@@ -6,7 +6,8 @@ include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "build.rs", "schema/*", "
 build = "build.rs"
 license = "MIT OR Apache-2.0"
 description = "RFSoC Gen3 MKID Readout RPC Interface"
-homepage = "https://mazinlab.github.io/"
+homepage = "https://github.com/MazinLab/gen3_rpc"
+repository = "https://github.com/MazinLab/gen3_rpc"
 
 [dependencies]
 capnp = "0.20.3"
