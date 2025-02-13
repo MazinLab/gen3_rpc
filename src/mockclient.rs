@@ -33,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::task::spawn_local(rpc_system);
 
             let mut dactable = board.get_dac_table().await?;
+            let mut dsp_scale = board.get_dsp_scale().await?;
 
             let mut d = dactable.get_dac_table().await?;
 
@@ -44,6 +45,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let p = dactable.get_dac_table().await?;
             println!("After: {:?}", p[..16].iter().collect::<Vec<_>>());
+
+            let scale = dsp_scale.get_fft_scale().await?;
+            println!("Starting Scale: {:?}", scale);
+
+            let scale = dsp_scale.set_fft_scale(0xF0F).await;
+            println!("Set Valid Scale: {:?}", scale);
+
+            let scale = dsp_scale.set_fft_scale(0xF0F0).await;
+            println!("Set Invalid Scale: {:?}", scale);
 
             Ok(())
         })

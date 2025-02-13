@@ -9,6 +9,7 @@ use num_complex::Complex;
 
 pub type Hertz = Rational64;
 
+#[derive(Debug)]
 pub enum Gen3RpcError {
     CapnProto(capnp::Error),
     Capture(CaptureError),
@@ -18,12 +19,14 @@ pub enum Gen3RpcError {
     DSPScale(DSPScaleError),
 }
 
+#[derive(Debug)]
 pub enum CaptureError {
     CapnProto(capnp::Error),
     UnsupportedTap,
     MemoryUnavailable,
 }
 
+#[derive(Debug)]
 pub enum ChannelAllocationError {
     CapnProto(capnp::Error),
     OutOfChannels,
@@ -31,18 +34,21 @@ pub enum ChannelAllocationError {
     SourceDestIncompatability,
 }
 
+#[derive(Debug)]
 pub enum FrequencyError {
     CapnProto(capnp::Error),
     CouldntLock,
     Unachievable,
 }
 
+#[derive(Debug)]
 pub enum AttenError {
     CapnProto(capnp::Error),
     Unachievable,
     Unsafe,
 }
 
+#[derive(Debug)]
 pub enum DSPScaleError {
     CapnProto(capnp::Error),
     Clamped(u16),

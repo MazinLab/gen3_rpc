@@ -6,11 +6,13 @@ use std::{
     sync::{Arc, Mutex, RwLock, RwLockWriteGuard, TryLockError},
 };
 
-use capnp::capability::Promise;
+use capnp::{capability::Promise, traits::FromPointerBuilder};
 use capnp_rpc::{pry, rpc_twoparty_capnp, twoparty, RpcSystem};
 use futures::AsyncReadExt;
 
-struct DSPScale;
+struct DSPScale {
+    fft: u16,
+}
 struct IFBoard;
 struct DACTable {
     values: Box<[Complex<i16>; 524288]>,
@@ -316,21 +318,53 @@ impl gen3rpc_capnp::capture::Server for CaptureImpl {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Scale16 {
+    scale: u16,
+}
+
+impl capnp::traits::SetterInput<gen3rpc_capnp::dsp_scale::scale16::Owned> for Scale16 {
+    fn set_pointer_builder(
+        builder: capnp::private::layout::PointerBuilder<'_>,
+        input: Self,
+        _canonicalize: bool,
+    ) -> capnp::Result<()> {
+        let mut builder = gen3rpc_capnp::dsp_scale::scale16::Builder::init_pointer(builder, 1);
+        builder.set_scale(input.scale);
+        Ok(())
+    }
+}
 impl gen3rpc_capnp::dsp_scale::Server for DSPScaleImpl {
     fn get_fft_scale(
         &mut self,
         _: gen3rpc_capnp::dsp_scale::GetFftScaleParams,
-        _: gen3rpc_capnp::dsp_scale::GetFftScaleResults,
+        mut response: gen3rpc_capnp::dsp_scale::GetFftScaleResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        todo!()
+        let mut s16 = response.get().init_scale();
+        s16.set_scale(self.inner.read().unwrap().fft);
+        Promise::ok(())
     }
 
     fn set_fft_scale(
         &mut self,
-        _: gen3rpc_capnp::dsp_scale::SetFftScaleParams,
-        _: gen3rpc_capnp::dsp_scale::SetFftScaleResults,
+        params: gen3rpc_capnp::dsp_scale::SetFftScaleParams,
+        mut response: gen3rpc_capnp::dsp_scale::SetFftScaleResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        todo!()
+        let s16 = pry!(pry!(params.get()).get_scale()).get_scale();
+        {
+            let mut i = self.inner.write().unwrap();
+            i.fft = s16 & 0xfff;
+        }
+        let resimp = ResultImpl {
+            inner: if s16 == s16 & 0xfff {
+                Ok(Scale16 { scale: s16 & 0xfff })
+            } else {
+                Err(Scale16 { scale: s16 & 0xfff })
+            },
+        };
+        let client = capnp_rpc::new_client(resimp);
+        response.get().set_scale(client);
+        Promise::ok(())
     }
 }
 
@@ -479,7 +513,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 dsp_scale: DSPScaleImpl {
                     state: Arc::new(RwLock::new(DRState::Unshared)),
-                    inner: Arc::new(RwLock::new(DSPScale)),
+                    inner: Arc::new(RwLock::new(DSPScale { fft: 0 })),
                     stale: false,
                 },
                 if_board: IFBoardImpl {
