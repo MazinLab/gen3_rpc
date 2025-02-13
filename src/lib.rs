@@ -253,7 +253,7 @@ pub mod client {
     }
 
     pub struct Gen3Board {
-        client: gen3rpc_capnp::gen3_board::Client,
+        pub client: gen3rpc_capnp::gen3_board::Client,
     }
 
     pub struct DDC {
@@ -480,7 +480,7 @@ pub mod client {
     impl DACTable {
         pub async fn set_dac_table(
             &mut self,
-            data: [Complex<i16>; 524288],
+            data: Box<[Complex<i16>; 524288]>,
         ) -> Result<(), capnp::Error> {
             let mut request = self.client.set_request();
             request.get().init_replace().init_data(data.len() as u32);
@@ -491,6 +491,20 @@ pub mod client {
             }
             request.send().promise.await?;
             Ok(())
+        }
+
+        pub async fn get_dac_table(&self) -> Result<Box<[Complex<i16>; 524288]>, capnp::Error> {
+            let request = self.client.get_request();
+            let response = request.send().promise.await?;
+
+            let mut buf = Box::new([Complex::i(); 524288]);
+
+            for i in 0..response.get()?.get_data()?.len() {
+                let v = response.get()?.get_data()?.get(i);
+                buf[i as usize] = Complex::new(v.get_real(), v.get_imag())
+            }
+
+            Ok(buf)
         }
     }
 
