@@ -354,6 +354,7 @@ impl gen3rpc_capnp::dsp_scale::Server for DSPScaleImpl {
         {
             let mut i = self.inner.write().unwrap();
             i.fft = s16 & 0xfff;
+            println!("Set FFT Scale to {:03x}", i.fft);
         }
         let resimp = ResultImpl {
             inner: if s16 == s16 & 0xfff {
