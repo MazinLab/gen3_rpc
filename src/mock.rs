@@ -13,7 +13,7 @@ use futures::AsyncReadExt;
 struct DSPScale;
 struct IFBoard;
 struct DACTable {
-    values: [Complex<i16>; 524288],
+    values: Box<[Complex<i16>; 524288]>,
 }
 
 struct Gen3BoardImpl {
@@ -470,7 +470,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 dac_table: DACTableImpl {
                     state: Arc::new(RwLock::new(DRState::Unshared)),
                     inner: Arc::new(RwLock::new(DACTable {
-                        values: [Complex::i(); 524288],
+                        values: Box::new([Complex::i(); 524288]),
                     })),
                     stale: false,
                 },
