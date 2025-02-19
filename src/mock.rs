@@ -3,7 +3,8 @@ use gen3_rpc::{
         self,
         capture::capture_tap::Which::{DdcIq, Phase, RawIq},
     },
-    CaptureError, ChannelAllocationError, DDCChannelConfig, Snap,
+    AttenError, Attens, CaptureError, ChannelAllocationError, DDCChannelConfig, FrequencyError,
+    Hertz, Snap,
 };
 use num::Complex;
 
@@ -22,7 +23,12 @@ use futures::{future::try_join_all, AsyncReadExt, FutureExt, TryFutureExt};
 struct DSPScale {
     fft: u16,
 }
-struct IFBoard;
+
+struct IFBoard {
+    lo: Hertz,
+    attens: Attens,
+}
+
 struct DACTable {
     values: Box<[Complex<i16>; 524288]>,
 }
@@ -639,33 +645,65 @@ impl gen3rpc_capnp::if_board::Server for IFBoardImpl {
     fn get_freq(
         &mut self,
         _: gen3rpc_capnp::if_board::GetFreqParams,
-        _: gen3rpc_capnp::if_board::GetFreqResults,
+        mut response: gen3rpc_capnp::if_board::GetFreqResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        todo!()
+        let mut f = response.get().init_freq().init_frequency();
+        let l = self.inner.read().unwrap();
+        f.set_numerator(*l.lo.numer());
+        f.set_denominator(*l.lo.denom());
+        Promise::ok(())
     }
 
     fn set_freq(
         &mut self,
-        _: gen3rpc_capnp::if_board::SetFreqParams,
-        _: gen3rpc_capnp::if_board::SetFreqResults,
+        params: gen3rpc_capnp::if_board::SetFreqParams,
+        mut response: gen3rpc_capnp::if_board::SetFreqResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        todo!()
+        let pf = pry!(pry!(pry!(params.get()).get_freq()).get_frequency());
+        let mut l = self.inner.write().unwrap();
+        l.lo = Hertz::new(pf.get_numerator(), pf.get_denominator());
+        println!("Setting LO Freq to {}", l.lo);
+        response
+            .get()
+            .set_freq(capnp_rpc::new_client(ResultImpl::<_, FrequencyError> {
+                inner: Ok(Hertz::new(pf.get_numerator(), pf.get_denominator())),
+            }));
+        Promise::ok(())
     }
 
     fn get_attens(
         &mut self,
         _: gen3rpc_capnp::if_board::GetAttensParams,
-        _: gen3rpc_capnp::if_board::GetAttensResults,
+        mut response: gen3rpc_capnp::if_board::GetAttensResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        todo!()
+        let mut a = response.get().init_attens();
+        let l = self.inner.read().unwrap();
+        a.set_input(l.attens.input);
+        a.set_output(l.attens.output);
+        Promise::ok(())
     }
 
     fn set_attens(
         &mut self,
-        _: gen3rpc_capnp::if_board::SetAttensParams,
-        _: gen3rpc_capnp::if_board::SetAttensResults,
+        params: gen3rpc_capnp::if_board::SetAttensParams,
+        mut response: gen3rpc_capnp::if_board::SetAttensResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        todo!()
+        let pa = pry!(pry!(params.get()).get_attens());
+        let mut l = self.inner.write().unwrap();
+        l.attens.input = (pa.get_input() * 4.).round() / 4.;
+        l.attens.output = (pa.get_input() * 4.).round() / 4.;
+        println!("Setting attenuation to {:#?}", l.attens);
+
+        response
+            .get()
+            .set_attens(capnp_rpc::new_client(ResultImpl::<_, AttenError> {
+                inner: Ok(Attens {
+                    input: l.attens.input,
+                    output: l.attens.output,
+                }),
+            }));
+
+        Promise::ok(())
     }
 }
 
@@ -691,6 +729,7 @@ impl gen3rpc_capnp::dac_table::Server for DACTableImpl {
         _: gen3rpc_capnp::dac_table::SetResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let replace = pry!(pry!(pry!(params.get()).get_replace()).get_data());
+        println!("Setting DacTable");
 
         let mut i = self.inner.write().unwrap();
         for k in 0..replace.len() {
@@ -826,7 +865,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 if_board: IFBoardImpl {
                     state: Arc::new(RwLock::new(DRState::Unshared)),
-                    inner: Arc::new(RwLock::new(IFBoard)),
+                    inner: Arc::new(RwLock::new(IFBoard {
+                        lo: Hertz::new(6_000_000_000, 1),
+                        attens: Attens {
+                            input: 10.,
+                            output: 20.,
+                        },
+                    })),
                     stale: false,
                 },
             });

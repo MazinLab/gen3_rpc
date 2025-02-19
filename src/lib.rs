@@ -10,6 +10,20 @@ use num_complex::Complex;
 
 pub type Hertz = Rational64;
 
+impl SetterInput<gen3rpc_capnp::hertz::Owned> for Hertz {
+    fn set_pointer_builder(
+        builder: capnp::private::layout::PointerBuilder<'_>,
+        input: Self,
+        _canonicalize: bool,
+    ) -> capnp::Result<()> {
+        let builder = gen3rpc_capnp::hertz::Builder::init_pointer(builder, 1);
+        let mut f = builder.init_frequency();
+        f.set_numerator(*input.numer());
+        f.set_denominator(*input.denom());
+        Ok(())
+    }
+}
+
 impl SetterInput<gen3rpc_capnp::complex_int32::Owned> for Complex<i32> {
     fn set_pointer_builder(
         builder: capnp::private::layout::PointerBuilder<'_>,
@@ -140,6 +154,22 @@ impl From<FrequencyError> for Gen3RpcError {
     }
 }
 
+impl SetterInput<gen3rpc_capnp::if_board::freq_error::Owned> for FrequencyError {
+    fn set_pointer_builder(
+        builder: capnp::private::layout::PointerBuilder<'_>,
+        input: Self,
+        _canonicalize: bool,
+    ) -> capnp::Result<()> {
+        let mut builder = gen3rpc_capnp::if_board::freq_error::Builder::init_pointer(builder, 1);
+        match input {
+            Self::CapnProto(e) => return Err(e),
+            Self::Unachievable => builder.set_unachievable(()),
+            Self::CouldntLock => builder.set_couldnt_lock(()),
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum AttenError {
     CapnProto(capnp::Error),
@@ -156,6 +186,22 @@ impl<T: Into<capnp::Error>> From<T> for AttenError {
 impl From<AttenError> for Gen3RpcError {
     fn from(value: AttenError) -> Self {
         Gen3RpcError::Atten(value)
+    }
+}
+
+impl SetterInput<gen3rpc_capnp::if_board::atten_error::Owned> for AttenError {
+    fn set_pointer_builder(
+        builder: capnp::private::layout::PointerBuilder<'_>,
+        input: Self,
+        _canonicalize: bool,
+    ) -> capnp::Result<()> {
+        let mut builder = gen3rpc_capnp::if_board::atten_error::Builder::init_pointer(builder, 1);
+        match input {
+            Self::CapnProto(e) => return Err(e),
+            Self::Unachievable => builder.set_unachievable(()),
+            Self::Unsafe => builder.set_unsafe(()),
+        }
+        Ok(())
     }
 }
 
@@ -294,7 +340,21 @@ impl SetterInput<gen3rpc_capnp::ddc::capabilities::Owned> for DDCCapabilities {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Attens {
     pub input: f32,
     pub output: f32,
+}
+
+impl SetterInput<gen3rpc_capnp::if_board::attens::Owned> for Attens {
+    fn set_pointer_builder(
+        builder: capnp::private::layout::PointerBuilder<'_>,
+        input: Self,
+        _canonicalize: bool,
+    ) -> capnp::Result<()> {
+        let mut builder = gen3rpc_capnp::if_board::attens::Builder::init_pointer(builder, 1);
+        builder.set_input(input.input);
+        builder.set_output(input.output);
+        Ok(())
+    }
 }

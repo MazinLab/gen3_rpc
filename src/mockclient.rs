@@ -1,6 +1,6 @@
 use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
 use futures::AsyncReadExt;
-use gen3_rpc::{client, DDCChannelConfig};
+use gen3_rpc::{client, Attens, DDCChannelConfig, Hertz};
 use num_complex::Complex;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
@@ -37,17 +37,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut dsp_scale = board.get_dsp_scale().await?;
             let ddc = board.get_ddc().await?;
             let capture = board.get_capture().await?;
+            let mut ifboard = board.get_if_board().await?;
+
+            println!(
+                "Setting IFBoard Freq: {:#?}",
+                ifboard.set_freq(Hertz::new(6_100_000_000, 1)).await
+            );
+
+            println!(
+                "Setting IFBoard Atten: {:#?}",
+                ifboard
+                    .set_attens(Attens {
+                        input: 10.3,
+                        output: 11.1
+                    })
+                    .await
+            );
 
             let mut d = dactable.get_dac_table().await?;
 
-            println!("Before: {:?}", d[..16].iter().collect::<Vec<_>>());
+            println!("DAC Table Before: {:?}", d[..16].iter().collect::<Vec<_>>());
             d[0].re = 8;
             d[1].im = 32;
             d[2].re = 0x55;
             dactable.set_dac_table(d).await?;
 
             let p = dactable.get_dac_table().await?;
-            println!("After: {:?}", p[..16].iter().collect::<Vec<_>>());
+            println!("DAC Table After: {:?}", p[..16].iter().collect::<Vec<_>>());
 
             let scale = dsp_scale.get_fft_scale().await?;
             println!("Starting Scale: {:?}", scale);
@@ -58,6 +74,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let scale = dsp_scale.set_fft_scale(0xF0F0).await;
             println!("Set Invalid Scale: {:?}", scale);
 
+            println!(
+                "Allocating DDC Channels Second Allocation will fail if server not restarted ATM"
+            );
             let channela = ddc
                 .allocate_channel(DDCChannelConfig {
                     source_bin: 0,
@@ -69,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await
                 .unwrap();
 
-            let channelb = ddc
+            let channelb = if let Ok(b) = ddc
                 .allocate_channel(DDCChannelConfig {
                     source_bin: 0,
                     ddc_freq: 10,
@@ -78,7 +97,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     center: Complex::i(),
                 })
                 .await
-                .unwrap();
+            {
+                b
+            } else {
+                println!("Allocating DDC Channel with specific bin 11 failed, probably already in use, allocating without specified bin");
+                ddc.allocate_channel(DDCChannelConfig {
+                    source_bin: 0,
+                    ddc_freq: 10,
+                    dest_bin: None,
+                    rotation: 0,
+                    center: Complex::i(),
+                })
+                .await
+                .unwrap()
+            };
 
             let channels = vec![&channela, &channelb];
 
