@@ -1,6 +1,7 @@
 use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
 use futures::AsyncReadExt;
-use gen3_rpc::client;
+use gen3_rpc::{client, DDCChannelConfig};
+use num_complex::Complex;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 #[tokio::main(flavor = "current_thread")]
@@ -34,6 +35,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut dactable = board.get_dac_table().await?;
             let mut dsp_scale = board.get_dsp_scale().await?;
+            let ddc = board.get_ddc().await?;
+            let capture = board.get_capture().await?;
 
             let mut d = dactable.get_dac_table().await?;
 
@@ -54,6 +57,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let scale = dsp_scale.set_fft_scale(0xF0F0).await;
             println!("Set Invalid Scale: {:?}", scale);
+
+            let channela = ddc
+                .allocate_channel(DDCChannelConfig {
+                    source_bin: 0,
+                    ddc_freq: 0,
+                    dest_bin: None,
+                    rotation: 0,
+                    center: Complex::new(0, 0),
+                })
+                .await
+                .unwrap();
+
+            let channelb = ddc
+                .allocate_channel(DDCChannelConfig {
+                    source_bin: 0,
+                    ddc_freq: 10,
+                    dest_bin: Some(11),
+                    rotation: 0,
+                    center: Complex::i(),
+                })
+                .await
+                .unwrap();
+
+            let channels = vec![&channela, &channelb];
+
+            let raw = capture
+                .capture(client::CaptureTap::RawIQ, 16)
+                .await
+                .unwrap();
+            println!("Raw Snap: {:#?}", raw);
+
+            let phase = capture
+                .capture(client::CaptureTap::Phase(channels.clone()), 16)
+                .await
+                .unwrap();
+            println!("Phase Snap: {:#?}", phase);
+
+            let ddciq = capture
+                .capture(client::CaptureTap::DDCIQ(channels.clone()), 16)
+                .await
+                .unwrap();
+            println!("DDC Snap: {:#?}", ddciq);
 
             Ok(())
         })

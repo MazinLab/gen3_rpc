@@ -1,14 +1,23 @@
-use gen3_rpc::gen3rpc_capnp;
+use gen3_rpc::{
+    gen3rpc_capnp::{
+        self,
+        capture::capture_tap::Which::{DdcIq, Phase, RawIq},
+    },
+    CaptureError, ChannelAllocationError, DDCChannelConfig, Snap,
+};
 use num::Complex;
 
 use std::{
+    collections::HashMap,
     net::{Ipv4Addr, SocketAddrV4},
+    ops::Deref,
     sync::{Arc, Mutex, RwLock, RwLockWriteGuard, TryLockError},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use capnp::{capability::Promise, traits::FromPointerBuilder};
 use capnp_rpc::{pry, rpc_twoparty_capnp, twoparty, RpcSystem};
-use futures::AsyncReadExt;
+use futures::{future::try_join_all, AsyncReadExt, FutureExt, TryFutureExt};
 
 struct DSPScale {
     fft: u16,
@@ -150,7 +159,7 @@ impl<T> DroppableReferenceImpl<T> {
 
 #[derive(Clone)]
 struct DDCImpl {
-    inner: Arc<Mutex<()>>,
+    inner: Arc<Mutex<HashMap<u16, DDCChannelConfig>>>,
 }
 
 #[derive(Clone)]
@@ -161,6 +170,8 @@ struct CaptureImpl {
 type DSPScaleImpl = DroppableReferenceImpl<DSPScale>;
 type IFBoardImpl = DroppableReferenceImpl<IFBoard>;
 type DACTableImpl = DroppableReferenceImpl<DACTable>;
+type SnapImpl = DroppableReferenceImpl<Snap>;
+type DDCChannelImpl = DroppableReferenceImpl<DDCChannelConfig>;
 
 impl<T> gen3rpc_capnp::droppable_reference::Server for DroppableReferenceImpl<T> {
     fn drop(
@@ -285,10 +296,85 @@ impl gen3rpc_capnp::ddc::Server for DDCImpl {
 
     fn allocate_channel(
         &mut self,
-        _: gen3rpc_capnp::ddc::AllocateChannelParams,
-        _: gen3rpc_capnp::ddc::AllocateChannelResults,
+        params: gen3rpc_capnp::ddc::AllocateChannelParams,
+        mut response: gen3rpc_capnp::ddc::AllocateChannelResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        todo!()
+        let ccfg = pry!(pry!(params.get()).get_config());
+        let db = pry!(ccfg.get_destination_bin().which());
+        let c = pry!(ccfg.get_center());
+        let mut ccfg = DDCChannelConfig {
+            source_bin: ccfg.get_source_bin(),
+            ddc_freq: ccfg.get_ddc_freq(),
+            rotation: ccfg.get_rotation(),
+            dest_bin: match db {
+                gen3rpc_capnp::ddc_channel::channel_config::destination_bin::Which::None(()) => {
+                    None
+                }
+                gen3rpc_capnp::ddc_channel::channel_config::destination_bin::Which::Some(i) => {
+                    Some(i)
+                }
+            },
+            center: Complex::new(c.get_real(), c.get_imag()),
+        };
+        println!("Allocating channel with spec: {:#?}", ccfg);
+        let mut hm = self.inner.lock().unwrap();
+        if let Some(d) = ccfg.dest_bin {
+            if let std::collections::hash_map::Entry::Vacant(e) = hm.entry(d as u16) {
+                println!("Allocated with dest {}", d);
+                e.insert(ccfg.clone());
+                let res: ResultImpl<gen3rpc_capnp::ddc_channel::Client, ChannelAllocationError> =
+                    ResultImpl {
+                        inner: Ok(capnp_rpc::new_client(DDCChannelImpl {
+                            inner: Arc::new(RwLock::new(ccfg)),
+                            stale: false,
+                            state: Arc::new(RwLock::new(DRState::Exclusive)),
+                        })),
+                    };
+                response.get().set_result(capnp_rpc::new_client(res));
+            } else {
+                println!("Allocated failed");
+                let res: ResultImpl<gen3rpc_capnp::ddc_channel::Client, ChannelAllocationError> =
+                    ResultImpl {
+                        inner: Err(ChannelAllocationError::DestinationInUse),
+                    };
+                response.get().set_result(capnp_rpc::new_client(res));
+            }
+        } else {
+            for i in 0..2048 {
+                if !hm.contains_key(&i) {
+                    ccfg.dest_bin = Some(i as u32);
+                    break;
+                }
+            }
+            match ccfg.dest_bin {
+                Some(d) => {
+                    println!("Allocated with dest {}", d);
+                    hm.insert(d as u16, ccfg.clone());
+                    let res: ResultImpl<
+                        gen3rpc_capnp::ddc_channel::Client,
+                        ChannelAllocationError,
+                    > = ResultImpl {
+                        inner: Ok(capnp_rpc::new_client(DDCChannelImpl {
+                            inner: Arc::new(RwLock::new(ccfg)),
+                            stale: false,
+                            state: Arc::new(RwLock::new(DRState::Exclusive)),
+                        })),
+                    };
+                    response.get().set_result(capnp_rpc::new_client(res));
+                }
+                None => {
+                    println!("Allocated failed");
+                    let res: ResultImpl<
+                        gen3rpc_capnp::ddc_channel::Client,
+                        ChannelAllocationError,
+                    > = ResultImpl {
+                        inner: Err(ChannelAllocationError::OutOfChannels),
+                    };
+                    response.get().set_result(capnp_rpc::new_client(res));
+                }
+            }
+        }
+        Promise::ok(())
     }
 
     fn allocate_channel_mut(
@@ -308,13 +394,193 @@ impl gen3rpc_capnp::ddc::Server for DDCImpl {
     }
 }
 
+impl gen3rpc_capnp::ddc_channel::Server for DDCChannelImpl {
+    fn get(
+        &mut self,
+        _: gen3rpc_capnp::ddc_channel::GetParams,
+        mut response: gen3rpc_capnp::ddc_channel::GetResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        let mut r = response.get();
+        let l = self.inner.read().unwrap();
+        r.set_source_bin(l.source_bin);
+        r.set_ddc_freq(l.ddc_freq);
+        r.set_rotation(l.rotation);
+        r.reborrow()
+            .init_destination_bin()
+            .set_some(l.dest_bin.unwrap());
+        let mut c = r.init_center();
+        c.set_real(l.center.re);
+        c.set_imag(l.center.im);
+
+        Promise::ok(())
+    }
+    fn set(
+        &mut self,
+        _: gen3rpc_capnp::ddc_channel::SetParams,
+        _: gen3rpc_capnp::ddc_channel::SetResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        todo!()
+    }
+    fn set_source(
+        &mut self,
+        _: gen3rpc_capnp::ddc_channel::SetSourceParams,
+        _: gen3rpc_capnp::ddc_channel::SetSourceResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        todo!()
+    }
+    fn set_ddc_freq(
+        &mut self,
+        _: gen3rpc_capnp::ddc_channel::SetDdcFreqParams,
+        _: gen3rpc_capnp::ddc_channel::SetDdcFreqResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        todo!()
+    }
+    fn set_rotation(
+        &mut self,
+        _: gen3rpc_capnp::ddc_channel::SetRotationParams,
+        _: gen3rpc_capnp::ddc_channel::SetRotationResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        todo!()
+    }
+    fn set_center(
+        &mut self,
+        _: gen3rpc_capnp::ddc_channel::SetCenterParams,
+        _: gen3rpc_capnp::ddc_channel::SetCenterResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        todo!()
+    }
+    fn get_baseband_frequency(
+        &mut self,
+        _: gen3rpc_capnp::ddc_channel::GetBasebandFrequencyParams,
+        _: gen3rpc_capnp::ddc_channel::GetBasebandFrequencyResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        todo!()
+    }
+    fn get_dest(
+        &mut self,
+        _: gen3rpc_capnp::ddc_channel::GetDestParams,
+        mut response: gen3rpc_capnp::ddc_channel::GetDestResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        response
+            .get()
+            .set_dest_bin(self.inner.read().unwrap().dest_bin.unwrap());
+        Promise::ok(())
+    }
+}
+
 impl gen3rpc_capnp::capture::Server for CaptureImpl {
     fn capture(
         &mut self,
-        _: gen3rpc_capnp::capture::CaptureParams,
-        _: gen3rpc_capnp::capture::CaptureResults,
+        params: gen3rpc_capnp::capture::CaptureParams,
+        mut response: gen3rpc_capnp::capture::CaptureResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        todo!()
+        let pr = params.get();
+        let p = pry!(pr);
+        let tap = pry!(p.get_tap());
+        let length = p.get_length();
+
+        let _lock = self.inner.lock().unwrap();
+
+        match pry!(tap.which()) {
+            RawIq(()) => {
+                println!("Capturing Raw IQ");
+                let t = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or(Duration::from_secs(0));
+                let _table_offset = (t.subsec_nanos() % (128_000)) * 4;
+                let v: Vec<_> = (0..length)
+                    .map(|i| Complex::new((i & 0x7FFF) as i16, 0))
+                    .collect();
+                let mut r = response.get();
+                r.set_result(capnp_rpc::new_client(ResultImpl::<
+                    gen3_rpc::gen3rpc_capnp::snap::Client,
+                    CaptureError,
+                > {
+                    inner: Ok(capnp_rpc::new_client(DroppableReferenceImpl {
+                        state: Arc::new(RwLock::new(DRState::Exclusive)),
+                        inner: Arc::new(RwLock::new(Snap::Raw(v))),
+                        stale: false,
+                    })),
+                }));
+                Promise::ok(())
+            }
+            DdcIq(d) => {
+                let d = pry!(d);
+                let l = d.len();
+                let mut ids = vec![];
+                for c in d.into_iter() {
+                    ids.push(pry!(c).get_dest_request());
+                }
+                Promise::from_future(
+                    try_join_all(ids.into_iter().map(|a| {
+                        a.send().promise.map(|resp| {
+                            let r = resp?;
+                            Ok::<_, capnp::Error>(r.get()?.get_dest_bin())
+                        })
+                    }))
+                    .map_ok(move |ids| {
+                        println!("Capturing ddciq from channels {:?}", ids);
+                        let mut result = Vec::with_capacity(l as usize);
+                        for i in ids.into_iter() {
+                            let mut iqv = Vec::with_capacity(length as usize);
+                            for j in 0..length {
+                                iqv.push(Complex::new((i & 0x7FFF) as i16, (j & 0x7FFF) as i16));
+                            }
+                            result.push(iqv);
+                        }
+                        let mut p = response.get();
+                        p.set_result(capnp_rpc::new_client(ResultImpl::<
+                            gen3_rpc::gen3rpc_capnp::snap::Client,
+                            CaptureError,
+                        > {
+                            inner: Ok(capnp_rpc::new_client(DroppableReferenceImpl {
+                                state: Arc::new(RwLock::new(DRState::Exclusive)),
+                                inner: Arc::new(RwLock::new(Snap::DdcIQ(result))),
+                                stale: false,
+                            })),
+                        }));
+                    }),
+                )
+            }
+            Phase(p) => {
+                let p = pry!(p);
+                let l = p.len();
+                let mut ids = vec![];
+                for c in p.into_iter() {
+                    ids.push(pry!(c).get_dest_request());
+                }
+                Promise::from_future(
+                    try_join_all(ids.into_iter().map(|a| {
+                        a.send().promise.map(|resp| {
+                            let r = resp?;
+                            Ok::<_, capnp::Error>(r.get()?.get_dest_bin())
+                        })
+                    }))
+                    .map_ok(move |ids| {
+                        println!("Capturing phase from channels {:?}", ids);
+                        let mut result = Vec::with_capacity(l as usize);
+                        for i in ids.into_iter() {
+                            let mut iqp = Vec::with_capacity(length as usize);
+                            for j in 0..length {
+                                iqp.push((i & 0x7FFF) as i16 + (j & 0x7FFF) as i16);
+                            }
+                            result.push(iqp);
+                        }
+                        let mut p = response.get();
+                        p.set_result(capnp_rpc::new_client(ResultImpl::<
+                            gen3_rpc::gen3rpc_capnp::snap::Client,
+                            CaptureError,
+                        > {
+                            inner: Ok(capnp_rpc::new_client(DroppableReferenceImpl {
+                                state: Arc::new(RwLock::new(DRState::Exclusive)),
+                                inner: Arc::new(RwLock::new(Snap::Phase(result))),
+                                stale: false,
+                            })),
+                        }));
+                    }),
+                )
+            }
+        }
     }
 }
 
@@ -489,6 +755,47 @@ impl gen3rpc_capnp::gen3_board::Server for Gen3BoardImpl {
     }
 }
 
+impl gen3rpc_capnp::snap::Server for SnapImpl {
+    fn get(
+        &mut self,
+        _: gen3rpc_capnp::snap::GetParams,
+        mut results: gen3rpc_capnp::snap::GetResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        let b = self.inner.read().unwrap();
+        match b.deref() {
+            Snap::Raw(v) => {
+                let mut bv = results.get().init_raw_iq(v.len() as u32);
+                for (i, c) in v.iter().enumerate() {
+                    let mut bc = bv.reborrow().get(i as u32);
+                    bc.set_real(c.re);
+                    bc.set_imag(c.im);
+                }
+            }
+            Snap::DdcIQ(v) => {
+                let mut bv = results.get().init_ddc_iq(v.len() as u32);
+                for (i, cv) in v.iter().enumerate() {
+                    let mut bcv = bv.reborrow().init(i as u32, cv.len() as u32);
+                    for (j, c) in cv.iter().enumerate() {
+                        let mut bc = bcv.reborrow().get(j as u32);
+                        bc.set_real(c.re);
+                        bc.set_imag(c.im);
+                    }
+                }
+            }
+            Snap::Phase(v) => {
+                let mut bv = results.get().init_phase(v.len() as u32);
+                for (i, pv) in v.iter().enumerate() {
+                    let mut bpv = bv.reborrow().init(i as u32, pv.len() as u32);
+                    for (j, p) in pv.iter().enumerate() {
+                        bpv.set(j as u32, *p);
+                    }
+                }
+            }
+        }
+        Promise::ok(())
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::task::LocalSet::new()
@@ -500,7 +807,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
             let client: gen3rpc_capnp::gen3_board::Client = capnp_rpc::new_client(Gen3BoardImpl {
                 ddc: DDCImpl {
-                    inner: Arc::new(Mutex::new(())),
+                    inner: Arc::new(Mutex::new(HashMap::new())),
                 },
                 dac_table: DACTableImpl {
                     state: Arc::new(RwLock::new(DRState::Unshared)),

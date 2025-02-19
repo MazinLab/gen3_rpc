@@ -111,12 +111,13 @@ interface DdcChannel extends(DroppableReference) {
   get @0 () -> ChannelConfig;
   set @1 (replace: ChannelConfig) $mut;
 
-  setSource @2 (sourceBin :UInt16) $mut;
-  setDdcFreq @3 (ddcFreq :Int16) $mut;
-  setRotation @4 (rotation :Int16) $mut;
-  setCenter @5 (center :ComplexInt16) $mut;
+  setSource @2 (sourceBin :UInt32) $mut;
+  setDdcFreq @3 (ddcFreq :Int32) $mut;
+  setRotation @4 (rotation :Int32) $mut;
+  setCenter @5 (center :ComplexInt32) $mut;
 
   getBasebandFrequency @6 () -> (frequency :Hertz);
+  getDest @7 () -> (destBin :UInt32);
 }
 
 interface Ddc {
@@ -125,6 +126,7 @@ interface Ddc {
       outOfChannels @0: Void;
       destinationInUse @1: Void;
       sourceDestIncompatible @2: Void;
+      usedTooManyBits @3: Void;
     }
   }
 
