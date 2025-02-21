@@ -20,10 +20,27 @@ use futures_io::{AsyncRead, AsyncWrite};
 use num::Rational64;
 use num_complex::Complex;
 
-pub enum CaptureTap<'a> {
+pub struct CaptureTap<'a> {
+    pub rfchain: &'a RFChain<'a>,
+    pub tap: Tap<'a>,
+}
+
+impl<'a> CaptureTap<'a> {
+    pub fn new(rfchain: &'a RFChain<'a>, tap: Tap<'a>) -> CaptureTap<'a> {
+        CaptureTap { rfchain, tap }
+    }
+}
+
+pub struct RFChain<'a> {
+    pub dac_table: &'a DACTable,
+    pub if_board: &'a IFBoard,
+    pub dsp_scale: &'a DSPScale,
+}
+
+pub enum Tap<'a> {
     RawIQ,
-    DDCIQ(Vec<&'a DDCChannel>),
-    Phase(Vec<&'a DDCChannel>),
+    DDCIQ(&'a [&'a DDCChannel]),
+    Phase(&'a [&'a DDCChannel]),
 }
 
 impl<T, E> From<RWhich<T, E>> for Result<T, E> {
@@ -58,8 +75,10 @@ impl From<CAEWhich> for ChannelAllocationError {
         match value {
             CAEWhich::OutOfChannels(_) => Self::OutOfChannels,
             CAEWhich::DestinationInUse(_) => Self::DestinationInUse,
-            CAEWhich::SourceDestIncompatible(_) => Self::SourceDestIncompatability,
-            CAEWhich::UsedTooManyBits(_) => Self::UsedTooManyBits,
+            CAEWhich::SourceDestIncompatible(_) => {
+                Self::ConfigError(ChannelConfigError::SourceDestIncompatability)
+            }
+            CAEWhich::UsedTooManyBits(_) => Self::ConfigError(ChannelConfigError::UsedTooManyBits),
         }
     }
 }
@@ -269,17 +288,23 @@ impl DDC {
 impl Capture {
     pub async fn capture(&self, tap: CaptureTap<'_>, length: u64) -> Result<Snap, CaptureError> {
         let mut request = self.client.capture_request();
-        match tap {
-            CaptureTap::RawIQ => {
-                request.get().init_tap().set_raw_iq(());
+        let mut rtap = request.get().init_tap();
+        let mut rfchain = rtap.reborrow().init_rf_chain();
+        rfchain.set_dac_table(tap.rfchain.dac_table.client.clone());
+        rfchain.set_if_board(tap.rfchain.if_board.client.clone());
+        rfchain.set_dsp_scale(tap.rfchain.dsp_scale.client.clone());
+
+        match tap.tap {
+            Tap::RawIQ => {
+                rtap.set_raw_iq(());
             }
-            CaptureTap::DDCIQ(ddcs) => {
-                let mut taps = request.get().init_tap().init_ddc_iq(ddcs.len() as u32);
+            Tap::DDCIQ(ddcs) => {
+                let mut taps = rtap.init_ddc_iq(ddcs.len() as u32);
                 for (i, ddc) in ddcs.into_iter().enumerate() {
                     taps.set(i as u32, ddc.client.clone().into_client_hook())
                 }
             }
-            CaptureTap::Phase(ddcs) => {
+            Tap::Phase(ddcs) => {
                 let mut taps = request.get().init_tap().init_phase(ddcs.len() as u32);
                 for (i, ddc) in ddcs.into_iter().enumerate() {
                     taps.set(i as u32, ddc.client.clone().into_client_hook())

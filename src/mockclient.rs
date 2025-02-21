@@ -1,6 +1,9 @@
 use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
 use futures::AsyncReadExt;
-use gen3_rpc::{client, Attens, DDCChannelConfig, Hertz};
+use gen3_rpc::{
+    client::{self, CaptureTap, RFChain, Tap},
+    Attens, DDCChannelConfig, Hertz,
+};
 use num_complex::Complex;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
@@ -114,20 +117,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let channels = vec![&channela, &channelb];
 
+            let rfchain = RFChain {
+                dac_table: &dactable,
+                if_board: &ifboard,
+                dsp_scale: &dsp_scale,
+            };
+
             let raw = capture
-                .capture(client::CaptureTap::RawIQ, 16)
+                .capture(CaptureTap::new(&rfchain, Tap::RawIQ), 16)
                 .await
                 .unwrap();
             println!("Raw Snap: {:#?}", raw);
 
             let phase = capture
-                .capture(client::CaptureTap::Phase(channels.clone()), 16)
+                .capture(CaptureTap::new(&rfchain, Tap::Phase(&channels)), 16)
                 .await
                 .unwrap();
             println!("Phase Snap: {:#?}", phase);
 
             let ddciq = capture
-                .capture(client::CaptureTap::DDCIQ(channels.clone()), 16)
+                .capture(CaptureTap::new(&rfchain, Tap::Phase(&channels)), 16)
                 .await
                 .unwrap();
             println!("DDC Snap: {:#?}", ddciq);

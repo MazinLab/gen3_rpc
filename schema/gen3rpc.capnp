@@ -20,6 +20,8 @@ struct ComplexInt32 {
   imag @1 :Int32;
 }
 
+struct VoidStruct {}
+
 # Do to limitations in the capnp encoding these need to be pointer types
 interface Option(T) {
   struct Option {
@@ -98,7 +100,7 @@ interface DspScale extends(DroppableReference) {
 
 interface DdcChannel extends(DroppableReference) {
   struct ChannelConfig {
-    sourceBin @0 :UInt32;
+    sourceBin @0: UInt32;
     ddcFreq @1: Int32;
     destinationBin: union {
       none @2: Void;
@@ -108,13 +110,35 @@ interface DdcChannel extends(DroppableReference) {
     center @5: ComplexInt32 = (real = 0, imag = 0);
   }
 
-  get @0 () -> ChannelConfig;
-  set @1 (replace: ChannelConfig) $mut;
+  struct ErasedChannelConfig {
+    sourceBin @0: UInt32;
+    ddcFreq @1: Int32;
+    rotation @2: Int32 = 0;
+    center @3: ComplexInt32 = (real = 0, imag = 0);
+  }
 
-  setSource @2 (sourceBin :UInt32) $mut;
-  setDdcFreq @3 (ddcFreq :Int32) $mut;
-  setRotation @4 (rotation :Int32) $mut;
-  setCenter @5 (center :ComplexInt32) $mut;
+  struct ActualizedChannelConfig {
+    sourceBin @0: UInt32;
+    destBin @1: UInt32;
+    ddcFreq @2: Int32;
+    rotation @3: Int32 = 0;
+    center @4: ComplexInt32 = (real = 0, imag = 0);
+  }
+
+  struct ChannelConfigError {
+    union {
+      sourceDestIncompatible @0: Void;
+      usedTooManyBits @1: Void;
+    }
+  }
+
+  get @0 () -> ActualizedChannelConfig;
+  set @1 (replace: ErasedChannelConfig) -> (result :Result(VoidStruct, ChannelConfigError)) $mut;
+
+  setSource @2 (sourceBin :UInt32) -> (result :Result(VoidStruct, ChannelConfigError)) $mut;
+  setDdcFreq @3 (ddcFreq :Int32) -> (result :Result(VoidStruct, ChannelConfigError)) $mut;
+  setRotation @4 (rotation :Int32) -> (result :Result(VoidStruct, ChannelConfigError)) $mut;
+  setCenter @5 (center :ComplexInt32) -> (result :Result(VoidStruct, ChannelConfigError)) $mut;
 
   getBasebandFrequency @6 () -> (frequency :Hertz);
   getDest @7 () -> (destBin :UInt32);
@@ -181,6 +205,7 @@ interface Capture {
   }
 
   struct CaptureTap {
+    rfChain @3: RfChain;
     union {
       rawIq @0: Void;
       ddcIq @1: List(DdcChannel);
@@ -189,6 +214,13 @@ interface Capture {
   }
 
   capture @0 (tap: CaptureTap, length: UInt64) -> (result: Result(Snap, CaptureError));
+  average @1 (tap: CaptureTap, length: UInt64) -> (result: Result(Snap, CaptureError));
+}
+
+struct RfChain {
+  dacTable @0: DacTable;
+  ifBoard @1: IfBoard;
+  dspScale @2: DspScale;
 }
 
 interface Gen3Board {

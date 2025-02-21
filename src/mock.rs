@@ -3,8 +3,8 @@ use gen3_rpc::{
         self,
         capture::capture_tap::Which::{DdcIq, Phase, RawIq},
     },
-    AttenError, Attens, CaptureError, ChannelAllocationError, DDCChannelConfig, FrequencyError,
-    Hertz, Snap,
+    ActualizedDDCChannelConfig, AttenError, Attens, CaptureError, ChannelAllocationError,
+    ChannelConfigError, DDCChannelConfig, ErasedDDCChannelConfig, FrequencyError, Hertz, Snap,
 };
 use num::Complex;
 
@@ -136,6 +136,14 @@ where
 }
 
 impl<T> DroppableReferenceImpl<T> {
+    fn lock_mut(&self) -> Result<RwLockWriteGuard<'_, T>, capnp::Error> {
+        let ls = self.state.read().unwrap();
+        match *ls {
+            DRState::Exclusive => Ok(self.inner.write().unwrap()),
+            _ => Err(capnp::Error::failed("Client does not have an exclusive reference to resource but called an exclusive method".into()))
+        }
+    }
+
     fn try_clone(&self) -> Result<Self, TryLockError<RwLockWriteGuard<DRState>>> {
         if self.stale {
             unreachable!("Client tried to clone a stale reference, which means it innapropriately leaked it past a drop, dropMut, or tryIntoMut call")
@@ -161,11 +169,19 @@ impl<T> DroppableReferenceImpl<T> {
             }
         }
     }
+
+    fn clone_weak(&self) -> Self {
+        DroppableReferenceImpl {
+            inner: self.inner.clone(),
+            state: self.state.clone(),
+            stale: self.stale,
+        }
+    }
 }
 
 #[derive(Clone)]
 struct DDCImpl {
-    inner: Arc<Mutex<HashMap<u16, DDCChannelConfig>>>,
+    inner: Arc<Mutex<HashMap<u16, DDCChannelImpl>>>,
 }
 
 #[derive(Clone)]
@@ -177,7 +193,7 @@ type DSPScaleImpl = DroppableReferenceImpl<DSPScale>;
 type IFBoardImpl = DroppableReferenceImpl<IFBoard>;
 type DACTableImpl = DroppableReferenceImpl<DACTable>;
 type SnapImpl = DroppableReferenceImpl<Snap>;
-type DDCChannelImpl = DroppableReferenceImpl<DDCChannelConfig>;
+type DDCChannelImpl = DroppableReferenceImpl<ActualizedDDCChannelConfig>;
 
 impl<T> gen3rpc_capnp::droppable_reference::Server for DroppableReferenceImpl<T> {
     fn drop(
@@ -282,6 +298,100 @@ impl<T> gen3rpc_capnp::droppable_reference::Server for DroppableReferenceImpl<T>
     }
 }
 
+impl DDCImpl {
+    fn allocate_channel_inner(
+        &mut self,
+        ccfg: gen3rpc_capnp::ddc_channel::channel_config::Reader,
+        mode: DRState,
+    ) -> Result<ResultImpl<gen3rpc_capnp::ddc_channel::Client, ChannelAllocationError>, capnp::Error>
+    {
+        let db = ccfg.get_destination_bin().which()?;
+        let c = ccfg.get_center()?;
+        let ccfg = DDCChannelConfig {
+            source_bin: ccfg.get_source_bin(),
+            ddc_freq: ccfg.get_ddc_freq(),
+            rotation: ccfg.get_rotation(),
+            dest_bin: match db {
+                gen3rpc_capnp::ddc_channel::channel_config::destination_bin::Which::None(()) => {
+                    None
+                }
+                gen3rpc_capnp::ddc_channel::channel_config::destination_bin::Which::Some(i) => {
+                    Some(i)
+                }
+            },
+            center: Complex::new(c.get_real(), c.get_imag()),
+        };
+        println!("Allocating channel with spec: {:#?}", ccfg);
+        let mut hm = self.inner.lock().unwrap();
+        match ccfg.actualize() {
+            Ok(a) => {
+                if let std::collections::hash_map::Entry::Vacant(e) = hm.entry(a.dest_bin as u16) {
+                    println!("Allocated with dest {}", a.dest_bin);
+                    let ddcimpl = DDCChannelImpl {
+                        inner: Arc::new(RwLock::new(a)),
+                        stale: false,
+                        state: Arc::new(RwLock::new(mode)),
+                    };
+                    e.insert(ddcimpl.clone_weak());
+                    let res: ResultImpl<
+                        gen3rpc_capnp::ddc_channel::Client,
+                        ChannelAllocationError,
+                    > = ResultImpl {
+                        inner: Ok(capnp_rpc::new_client(ddcimpl)),
+                    };
+                    Ok(res)
+                } else {
+                    println!("Allocated failed");
+                    let res: ResultImpl<
+                        gen3rpc_capnp::ddc_channel::Client,
+                        ChannelAllocationError,
+                    > = ResultImpl {
+                        inner: Err(ChannelAllocationError::DestinationInUse),
+                    };
+                    Ok(res)
+                }
+            }
+            Err(mut c) => {
+                for i in 0..2048 {
+                    if !hm.contains_key(&i) {
+                        c.dest_bin = Some(i as u32);
+                        break;
+                    }
+                }
+                match c.actualize() {
+                    Ok(d) => {
+                        println!("Allocated with dest {}", d.dest_bin);
+                        let db = d.dest_bin;
+                        let ddcimpl = DDCChannelImpl {
+                            inner: Arc::new(RwLock::new(d)),
+                            stale: false,
+                            state: Arc::new(RwLock::new(mode)),
+                        };
+                        hm.insert(db as u16, ddcimpl.clone_weak());
+                        let res: ResultImpl<
+                            gen3rpc_capnp::ddc_channel::Client,
+                            ChannelAllocationError,
+                        > = ResultImpl {
+                            inner: Ok(capnp_rpc::new_client(ddcimpl)),
+                        };
+                        Ok(res)
+                    }
+                    Err(_) => {
+                        println!("Allocated failed");
+                        let res: ResultImpl<
+                            gen3rpc_capnp::ddc_channel::Client,
+                            ChannelAllocationError,
+                        > = ResultImpl {
+                            inner: Err(ChannelAllocationError::OutOfChannels),
+                        };
+                        Ok(res)
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl gen3rpc_capnp::ddc::Server for DDCImpl {
     fn capabilities(
         &mut self,
@@ -306,89 +416,20 @@ impl gen3rpc_capnp::ddc::Server for DDCImpl {
         mut response: gen3rpc_capnp::ddc::AllocateChannelResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let ccfg = pry!(pry!(params.get()).get_config());
-        let db = pry!(ccfg.get_destination_bin().which());
-        let c = pry!(ccfg.get_center());
-        let mut ccfg = DDCChannelConfig {
-            source_bin: ccfg.get_source_bin(),
-            ddc_freq: ccfg.get_ddc_freq(),
-            rotation: ccfg.get_rotation(),
-            dest_bin: match db {
-                gen3rpc_capnp::ddc_channel::channel_config::destination_bin::Which::None(()) => {
-                    None
-                }
-                gen3rpc_capnp::ddc_channel::channel_config::destination_bin::Which::Some(i) => {
-                    Some(i)
-                }
-            },
-            center: Complex::new(c.get_real(), c.get_imag()),
-        };
-        println!("Allocating channel with spec: {:#?}", ccfg);
-        let mut hm = self.inner.lock().unwrap();
-        if let Some(d) = ccfg.dest_bin {
-            if let std::collections::hash_map::Entry::Vacant(e) = hm.entry(d as u16) {
-                println!("Allocated with dest {}", d);
-                e.insert(ccfg.clone());
-                let res: ResultImpl<gen3rpc_capnp::ddc_channel::Client, ChannelAllocationError> =
-                    ResultImpl {
-                        inner: Ok(capnp_rpc::new_client(DDCChannelImpl {
-                            inner: Arc::new(RwLock::new(ccfg)),
-                            stale: false,
-                            state: Arc::new(RwLock::new(DRState::Exclusive)),
-                        })),
-                    };
-                response.get().set_result(capnp_rpc::new_client(res));
-            } else {
-                println!("Allocated failed");
-                let res: ResultImpl<gen3rpc_capnp::ddc_channel::Client, ChannelAllocationError> =
-                    ResultImpl {
-                        inner: Err(ChannelAllocationError::DestinationInUse),
-                    };
-                response.get().set_result(capnp_rpc::new_client(res));
-            }
-        } else {
-            for i in 0..2048 {
-                if !hm.contains_key(&i) {
-                    ccfg.dest_bin = Some(i as u32);
-                    break;
-                }
-            }
-            match ccfg.dest_bin {
-                Some(d) => {
-                    println!("Allocated with dest {}", d);
-                    hm.insert(d as u16, ccfg.clone());
-                    let res: ResultImpl<
-                        gen3rpc_capnp::ddc_channel::Client,
-                        ChannelAllocationError,
-                    > = ResultImpl {
-                        inner: Ok(capnp_rpc::new_client(DDCChannelImpl {
-                            inner: Arc::new(RwLock::new(ccfg)),
-                            stale: false,
-                            state: Arc::new(RwLock::new(DRState::Exclusive)),
-                        })),
-                    };
-                    response.get().set_result(capnp_rpc::new_client(res));
-                }
-                None => {
-                    println!("Allocated failed");
-                    let res: ResultImpl<
-                        gen3rpc_capnp::ddc_channel::Client,
-                        ChannelAllocationError,
-                    > = ResultImpl {
-                        inner: Err(ChannelAllocationError::OutOfChannels),
-                    };
-                    response.get().set_result(capnp_rpc::new_client(res));
-                }
-            }
-        }
+        let res = pry!(self.allocate_channel_inner(ccfg, DRState::Shared(1)));
+        response.get().set_result(capnp_rpc::new_client(res));
         Promise::ok(())
     }
 
     fn allocate_channel_mut(
         &mut self,
-        _: gen3rpc_capnp::ddc::AllocateChannelMutParams,
-        _: gen3rpc_capnp::ddc::AllocateChannelMutResults,
+        params: gen3rpc_capnp::ddc::AllocateChannelMutParams,
+        mut response: gen3rpc_capnp::ddc::AllocateChannelMutResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        todo!()
+        let ccfg = pry!(pry!(params.get()).get_config());
+        let res = pry!(self.allocate_channel_inner(ccfg, DRState::Exclusive));
+        response.get().set_result(capnp_rpc::new_client(res));
+        Promise::ok(())
     }
 
     fn retrieve_channel(
@@ -411,50 +452,109 @@ impl gen3rpc_capnp::ddc_channel::Server for DDCChannelImpl {
         r.set_source_bin(l.source_bin);
         r.set_ddc_freq(l.ddc_freq);
         r.set_rotation(l.rotation);
-        r.reborrow()
-            .init_destination_bin()
-            .set_some(l.dest_bin.unwrap());
+        r.set_dest_bin(l.dest_bin);
         let mut c = r.init_center();
         c.set_real(l.center.re);
         c.set_imag(l.center.im);
 
         Promise::ok(())
     }
+
     fn set(
         &mut self,
-        _: gen3rpc_capnp::ddc_channel::SetParams,
-        _: gen3rpc_capnp::ddc_channel::SetResults,
+        params: gen3rpc_capnp::ddc_channel::SetParams,
+        mut response: gen3rpc_capnp::ddc_channel::SetResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        todo!()
+        let mut il = pry!(self.lock_mut());
+        let ccfg = pry!(pry!(params.get()).get_replace());
+        let c = pry!(ccfg.get_center());
+        let ccfg = ErasedDDCChannelConfig {
+            source_bin: ccfg.get_source_bin(),
+            ddc_freq: ccfg.get_ddc_freq(),
+            rotation: ccfg.get_rotation(),
+            center: Complex::new(c.get_real(), c.get_imag()),
+        };
+        il.source_bin = ccfg.source_bin;
+        il.ddc_freq = ccfg.ddc_freq;
+        il.rotation = ccfg.rotation;
+        il.center = ccfg.center;
+        response
+            .get()
+            .set_result(capnp_rpc::new_client(ResultImpl::<_, ChannelConfigError> {
+                inner: Ok(()),
+            }));
+        Promise::ok(())
     }
+
     fn set_source(
         &mut self,
-        _: gen3rpc_capnp::ddc_channel::SetSourceParams,
-        _: gen3rpc_capnp::ddc_channel::SetSourceResults,
+        params: gen3rpc_capnp::ddc_channel::SetSourceParams,
+        mut response: gen3rpc_capnp::ddc_channel::SetSourceResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        todo!()
+        let source_bin = pry!(params.get()).get_source_bin();
+        let mut il = pry!(self.lock_mut());
+        il.source_bin = source_bin;
+
+        response
+            .get()
+            .set_result(capnp_rpc::new_client(ResultImpl::<_, ChannelConfigError> {
+                inner: Ok(()),
+            }));
+        Promise::ok(())
     }
+
     fn set_ddc_freq(
         &mut self,
-        _: gen3rpc_capnp::ddc_channel::SetDdcFreqParams,
-        _: gen3rpc_capnp::ddc_channel::SetDdcFreqResults,
+        params: gen3rpc_capnp::ddc_channel::SetDdcFreqParams,
+        mut response: gen3rpc_capnp::ddc_channel::SetDdcFreqResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        todo!()
+        let ddc_freq = pry!(params.get()).get_ddc_freq();
+        let mut il = pry!(self.lock_mut());
+        il.ddc_freq = ddc_freq;
+
+        response
+            .get()
+            .set_result(capnp_rpc::new_client(ResultImpl::<_, ChannelConfigError> {
+                inner: Ok(()),
+            }));
+        Promise::ok(())
     }
+
     fn set_rotation(
         &mut self,
-        _: gen3rpc_capnp::ddc_channel::SetRotationParams,
-        _: gen3rpc_capnp::ddc_channel::SetRotationResults,
+        params: gen3rpc_capnp::ddc_channel::SetRotationParams,
+        mut response: gen3rpc_capnp::ddc_channel::SetRotationResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        todo!()
+        let rotation = pry!(params.get()).get_rotation();
+        let mut il = pry!(self.lock_mut());
+        il.rotation = rotation;
+
+        response
+            .get()
+            .set_result(capnp_rpc::new_client(ResultImpl::<_, ChannelConfigError> {
+                inner: Ok(()),
+            }));
+        Promise::ok(())
     }
+
     fn set_center(
         &mut self,
-        _: gen3rpc_capnp::ddc_channel::SetCenterParams,
-        _: gen3rpc_capnp::ddc_channel::SetCenterResults,
+        params: gen3rpc_capnp::ddc_channel::SetCenterParams,
+        mut response: gen3rpc_capnp::ddc_channel::SetCenterResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        todo!()
+        let center = pry!(pry!(params.get()).get_center());
+        let mut il = pry!(self.lock_mut());
+        il.center.re = center.get_real();
+        il.center.im = center.get_imag();
+
+        response
+            .get()
+            .set_result(capnp_rpc::new_client(ResultImpl::<_, ChannelConfigError> {
+                inner: Ok(()),
+            }));
+        Promise::ok(())
     }
+
     fn get_baseband_frequency(
         &mut self,
         _: gen3rpc_capnp::ddc_channel::GetBasebandFrequencyParams,
@@ -462,6 +562,7 @@ impl gen3rpc_capnp::ddc_channel::Server for DDCChannelImpl {
     ) -> capnp::capability::Promise<(), capnp::Error> {
         todo!()
     }
+
     fn get_dest(
         &mut self,
         _: gen3rpc_capnp::ddc_channel::GetDestParams,
@@ -469,7 +570,7 @@ impl gen3rpc_capnp::ddc_channel::Server for DDCChannelImpl {
     ) -> capnp::capability::Promise<(), capnp::Error> {
         response
             .get()
-            .set_dest_bin(self.inner.read().unwrap().dest_bin.unwrap());
+            .set_dest_bin(self.inner.read().unwrap().dest_bin);
         Promise::ok(())
     }
 }

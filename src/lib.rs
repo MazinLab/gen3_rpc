@@ -10,6 +10,15 @@ use num_complex::Complex;
 
 pub type Hertz = Rational64;
 
+impl SetterInput<gen3rpc_capnp::void_struct::Owned> for () {
+    fn set_pointer_builder(
+        _builder: capnp::private::layout::PointerBuilder<'_>,
+        _input: Self,
+        _canonicalize: bool,
+    ) -> capnp::Result<()> {
+        Ok(())
+    }
+}
 impl SetterInput<gen3rpc_capnp::hertz::Owned> for Hertz {
     fn set_pointer_builder(
         builder: capnp::private::layout::PointerBuilder<'_>,
@@ -54,6 +63,7 @@ impl SetterInput<gen3rpc_capnp::complex_int16::Owned> for Complex<i16> {
 pub enum Gen3RpcError {
     CapnProto(capnp::Error),
     Capture(CaptureError),
+    ChannelConfig(ChannelConfigError),
     ChannelAllocation(ChannelAllocationError),
     Frequency(FrequencyError),
     Atten(AttenError),
@@ -96,12 +106,48 @@ impl SetterInput<gen3rpc_capnp::capture::capture_error::Owned> for CaptureError 
 }
 
 #[derive(Debug, Clone)]
+pub enum ChannelConfigError {
+    CapnProto(capnp::Error),
+    SourceDestIncompatability,
+    UsedTooManyBits,
+}
+
+impl<T: Into<capnp::Error>> From<T> for ChannelConfigError {
+    fn from(value: T) -> Self {
+        ChannelConfigError::CapnProto(value.into())
+    }
+}
+
+impl From<ChannelConfigError> for Gen3RpcError {
+    fn from(value: ChannelConfigError) -> Self {
+        Gen3RpcError::ChannelConfig(value)
+    }
+}
+
+impl SetterInput<gen3rpc_capnp::ddc_channel::channel_config_error::Owned> for ChannelConfigError {
+    fn set_pointer_builder(
+        builder: capnp::private::layout::PointerBuilder<'_>,
+        input: Self,
+        _canonicalize: bool,
+    ) -> capnp::Result<()> {
+        let mut builder =
+            gen3rpc_capnp::ddc_channel::channel_config_error::Builder::init_pointer(builder, 1);
+
+        match input {
+            Self::CapnProto(e) => return Err(e),
+            Self::SourceDestIncompatability => builder.set_source_dest_incompatible(()),
+            Self::UsedTooManyBits => builder.set_used_too_many_bits(()),
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum ChannelAllocationError {
     CapnProto(capnp::Error),
     OutOfChannels,
     DestinationInUse,
-    SourceDestIncompatability,
-    UsedTooManyBits,
+    ConfigError(ChannelConfigError),
 }
 
 impl<T: Into<capnp::Error>> From<T> for ChannelAllocationError {
@@ -128,8 +174,13 @@ impl SetterInput<gen3rpc_capnp::ddc::channel_allocation_error::Owned> for Channe
             Self::CapnProto(e) => return Err(e),
             Self::OutOfChannels => builder.set_out_of_channels(()),
             Self::DestinationInUse => builder.set_destination_in_use(()),
-            Self::SourceDestIncompatability => builder.set_source_dest_incompatible(()),
-            Self::UsedTooManyBits => builder.set_used_too_many_bits(()),
+            Self::ConfigError(ChannelConfigError::SourceDestIncompatability) => {
+                builder.set_source_dest_incompatible(())
+            }
+            Self::ConfigError(ChannelConfigError::UsedTooManyBits) => {
+                builder.set_used_too_many_bits(())
+            }
+            Self::ConfigError(ChannelConfigError::CapnProto(e)) => return Err(e),
         }
         Ok(())
     }
@@ -277,12 +328,54 @@ pub enum BinControl {
 }
 
 #[derive(Clone, Debug)]
+pub struct ErasedDDCChannelConfig {
+    pub source_bin: u32,
+    pub ddc_freq: i32,
+    pub rotation: i32,
+    pub center: Complex<i32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ActualizedDDCChannelConfig {
+    pub source_bin: u32,
+    pub ddc_freq: i32,
+    pub dest_bin: u32,
+    pub rotation: i32,
+    pub center: Complex<i32>,
+}
+
+#[derive(Clone, Debug)]
 pub struct DDCChannelConfig {
     pub source_bin: u32,
     pub ddc_freq: i32,
     pub dest_bin: Option<u32>,
     pub rotation: i32,
     pub center: Complex<i32>,
+}
+
+impl DDCChannelConfig {
+    pub fn erase(self) -> ErasedDDCChannelConfig {
+        ErasedDDCChannelConfig {
+            source_bin: self.source_bin,
+            ddc_freq: self.ddc_freq,
+            rotation: self.rotation,
+            center: self.center,
+        }
+    }
+
+    pub fn actualize(self) -> Result<ActualizedDDCChannelConfig, DDCChannelConfig> {
+        if let Some(dest) = self.dest_bin {
+            Ok(ActualizedDDCChannelConfig {
+                source_bin: self.source_bin,
+                ddc_freq: self.ddc_freq,
+                dest_bin: dest,
+                rotation: self.rotation,
+                center: self.center,
+            })
+        } else {
+            Err(self)
+        }
+    }
 }
 
 impl SetterInput<gen3rpc_capnp::ddc_channel::channel_config::Owned> for DDCChannelConfig {
