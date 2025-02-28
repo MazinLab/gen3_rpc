@@ -276,7 +276,7 @@ impl From<DSPScaleError> for Gen3RpcError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Snap {
     Raw(Vec<Complex<i16>>),
     DdcIQ(Vec<Vec<Complex<i16>>>),

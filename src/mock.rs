@@ -4,14 +4,14 @@ use gen3_rpc::{
         capture::capture_tap::Which::{DdcIq, Phase, RawIq},
     },
     ActualizedDDCChannelConfig, AttenError, Attens, CaptureError, ChannelAllocationError,
-    ChannelConfigError, DDCChannelConfig, ErasedDDCChannelConfig, FrequencyError, Hertz, Snap,
+    ChannelConfigError, DDCChannelConfig, ErasedDDCChannelConfig, FrequencyError, Hertz,
 };
 use num::Complex;
 
 use std::{
     collections::HashMap,
+    marker::PhantomData,
     net::{Ipv4Addr, SocketAddrV4},
-    ops::Deref,
     sync::{Arc, Mutex, RwLock, RwLockWriteGuard, TryLockError},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -60,6 +60,16 @@ trait IFBoard {
     fn get_attens(&self) -> Attens;
 }
 
+trait Snap {
+    fn get(&self) -> gen3_rpc::Snap;
+}
+
+impl Snap for gen3_rpc::Snap {
+    fn get(&self) -> gen3_rpc::Snap {
+        self.clone()
+    }
+}
+
 impl IFBoard for IFBoardMock {
     fn set_lo(&mut self, v: Hertz) -> Result<Hertz, FrequencyError> {
         self.lo = v;
@@ -95,6 +105,53 @@ impl DACTable for DACTableMock {
     }
 }
 
+trait DDCChannel {
+    fn get(&self) -> ActualizedDDCChannelConfig;
+    fn set(&mut self, replacement: ErasedDDCChannelConfig) -> Result<(), ChannelConfigError>;
+
+    fn set_source(&mut self, source_bin: u32) -> Result<(), ChannelConfigError>;
+    fn set_ddc_freq(&mut self, ddc_freq: i32) -> Result<(), ChannelConfigError>;
+    fn set_rotation(&mut self, rotation: i32) -> Result<(), ChannelConfigError>;
+    fn set_center(&mut self, center: Complex<i32>) -> Result<(), ChannelConfigError>;
+
+    fn get_baseband_freq(&self) -> Hertz;
+    fn get_dest(&self) -> u32 {
+        self.get().dest_bin
+    }
+}
+
+impl DDCChannel for ActualizedDDCChannelConfig {
+    fn get(&self) -> ActualizedDDCChannelConfig {
+        self.clone()
+    }
+    fn set(&mut self, replacement: ErasedDDCChannelConfig) -> Result<(), ChannelConfigError> {
+        self.source_bin = replacement.source_bin;
+        self.ddc_freq = replacement.ddc_freq;
+        self.rotation = replacement.rotation;
+        self.center = replacement.center;
+        Ok(())
+    }
+    fn set_source(&mut self, source_bin: u32) -> Result<(), ChannelConfigError> {
+        self.source_bin = source_bin;
+        Ok(())
+    }
+    fn set_ddc_freq(&mut self, ddc_freq: i32) -> Result<(), ChannelConfigError> {
+        self.ddc_freq = ddc_freq;
+        Ok(())
+    }
+    fn set_rotation(&mut self, rotation: i32) -> Result<(), ChannelConfigError> {
+        self.rotation = rotation;
+        Ok(())
+    }
+    fn set_center(&mut self, center: Complex<i32>) -> Result<(), ChannelConfigError> {
+        self.center = center;
+        Ok(())
+    }
+    fn get_baseband_freq(&self) -> Hertz {
+        Hertz::new(self.ddc_freq as i64, i32::MAX as i64)
+    }
+}
+
 struct Gen3BoardImpl {
     ddc: DDCImpl,
     dac_table: DACTableImpl,
@@ -113,13 +170,14 @@ enum DRState {
     Shared(usize),
 }
 
-struct DroppableReferenceImpl<T: 'static> {
+struct DroppableReferenceImpl<T: 'static, C> {
     state: Arc<RwLock<DRState>>,
     inner: Arc<RwLock<T>>,
     stale: bool,
+    phantom: PhantomData<C>,
 }
 
-impl<T> Drop for DroppableReferenceImpl<T> {
+impl<T, C> Drop for DroppableReferenceImpl<T, C> {
     fn drop(&mut self) {
         if !self.stale {
             let mut i = self.state.write().unwrap();
@@ -289,7 +347,7 @@ where
     }
 }
 
-impl<T> DroppableReferenceImpl<T> {
+impl<T, C> DroppableReferenceImpl<T, C> {
     fn lock_mut(&self) -> Result<RwLockWriteGuard<'_, T>, capnp::Error> {
         let ls = self.state.read().unwrap();
         match *ls {
@@ -311,6 +369,7 @@ impl<T> DroppableReferenceImpl<T> {
                     inner: self.inner.clone(),
                     state: self.state.clone(),
                     stale: false,
+                    phantom: PhantomData,
                 })
             }
             DRState::Shared(u) => {
@@ -319,6 +378,7 @@ impl<T> DroppableReferenceImpl<T> {
                     inner: self.inner.clone(),
                     state: self.state.clone(),
                     stale: false,
+                    phantom: PhantomData,
                 })
             }
         }
@@ -329,6 +389,7 @@ impl<T> DroppableReferenceImpl<T> {
             inner: self.inner.clone(),
             state: self.state.clone(),
             stale: self.stale,
+            phantom: PhantomData,
         }
     }
 }
@@ -344,8 +405,10 @@ struct CaptureImpl {
 }
 
 macro_rules! droppable_reference {
-    ($inner_type:path, $client_type:path) => {
-        impl gen3rpc_capnp::droppable_reference::Server for DroppableReferenceImpl<$inner_type> {
+    ($inner_trait:path, $client_type:path) => {
+        impl<T: $inner_trait> gen3rpc_capnp::droppable_reference::Server
+            for DroppableReferenceImpl<T, $client_type>
+        {
             fn drop(
                 &mut self,
                 _: gen3rpc_capnp::droppable_reference::DropParams,
@@ -397,6 +460,7 @@ macro_rules! droppable_reference {
                     state: self.state.clone(),
                     inner: self.inner.clone(),
                     stale: false,
+                    phantom: PhantomData,
                 });
                 response
                     .get()
@@ -422,6 +486,7 @@ macro_rules! droppable_reference {
                             state: self.state.clone(),
                             inner: self.inner.clone(),
                             stale: false,
+                            phantom: PhantomData,
                         });
                         let c = HiddenClient { client: d };
                         ResultImpl { inner: Ok(c) }
@@ -433,6 +498,7 @@ macro_rules! droppable_reference {
                             state: self.state.clone(),
                             inner: self.inner.clone(),
                             stale: false,
+                            phantom: PhantomData,
                         });
                         let c = HiddenClient { client: d };
                         ResultImpl { inner: Err(c) }
@@ -446,20 +512,18 @@ macro_rules! droppable_reference {
     };
 }
 
-type DSPScaleImpl = DroppableReferenceImpl<DSPScaleMock>;
-type IFBoardImpl = DroppableReferenceImpl<IFBoardMock>;
-type DACTableImpl = DroppableReferenceImpl<DACTableMock>;
-type SnapImpl = DroppableReferenceImpl<Snap>;
-type DDCChannelImpl = DroppableReferenceImpl<ActualizedDDCChannelConfig>;
+type DSPScaleImpl = DroppableReferenceImpl<DSPScaleMock, gen3rpc_capnp::dsp_scale::Client>;
+type IFBoardImpl = DroppableReferenceImpl<IFBoardMock, gen3rpc_capnp::if_board::Client>;
+type DACTableImpl = DroppableReferenceImpl<DACTableMock, gen3rpc_capnp::dac_table::Client>;
+// type SnapImpl = DroppableReferenceImpl<gen3_rpc::Snap, gen3rpc_capnp::snap::Client>;
+type DDCChannelImpl =
+    DroppableReferenceImpl<ActualizedDDCChannelConfig, gen3rpc_capnp::ddc_channel::Client>;
 
-droppable_reference!(DSPScaleMock, gen3rpc_capnp::dsp_scale::Client);
-droppable_reference!(IFBoardMock, gen3rpc_capnp::if_board::Client);
-droppable_reference!(DACTableMock, gen3rpc_capnp::dac_table::Client);
+droppable_reference!(DSPScale, gen3rpc_capnp::dsp_scale::Client);
+droppable_reference!(IFBoard, gen3rpc_capnp::if_board::Client);
+droppable_reference!(DACTable, gen3rpc_capnp::dac_table::Client);
 droppable_reference!(Snap, gen3rpc_capnp::snap::Client);
-droppable_reference!(
-    ActualizedDDCChannelConfig,
-    gen3rpc_capnp::ddc_channel::Client
-);
+droppable_reference!(DDCChannel, gen3rpc_capnp::ddc_channel::Client);
 
 impl DDCImpl {
     fn allocate_channel_inner(
@@ -494,6 +558,7 @@ impl DDCImpl {
                         inner: Arc::new(RwLock::new(a)),
                         stale: false,
                         state: Arc::new(RwLock::new(mode)),
+                        phantom: PhantomData,
                     };
                     e.insert(ddcimpl.clone_weak());
                     let res: ResultImpl<
@@ -529,6 +594,7 @@ impl DDCImpl {
                             inner: Arc::new(RwLock::new(d)),
                             stale: false,
                             state: Arc::new(RwLock::new(mode)),
+                            phantom: PhantomData,
                         };
                         hm.insert(db as u16, ddcimpl.clone_weak());
                         let res: ResultImpl<
@@ -604,14 +670,16 @@ impl gen3rpc_capnp::ddc::Server for DDCImpl {
     }
 }
 
-impl gen3rpc_capnp::ddc_channel::Server for DDCChannelImpl {
+impl<T: DDCChannel> gen3rpc_capnp::ddc_channel::Server
+    for DroppableReferenceImpl<T, gen3rpc_capnp::ddc_channel::Client>
+{
     fn get(
         &mut self,
         _: gen3rpc_capnp::ddc_channel::GetParams,
         mut response: gen3rpc_capnp::ddc_channel::GetResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let mut r = response.get();
-        let l = self.inner.read().unwrap();
+        let l = self.inner.read().unwrap().get();
         r.set_source_bin(l.source_bin);
         r.set_ddc_freq(l.ddc_freq);
         r.set_rotation(l.rotation);
@@ -637,14 +705,10 @@ impl gen3rpc_capnp::ddc_channel::Server for DDCChannelImpl {
             rotation: ccfg.get_rotation(),
             center: Complex::new(c.get_real(), c.get_imag()),
         };
-        il.source_bin = ccfg.source_bin;
-        il.ddc_freq = ccfg.ddc_freq;
-        il.rotation = ccfg.rotation;
-        il.center = ccfg.center;
         response
             .get()
             .set_result(capnp_rpc::new_client(ResultImpl::<_, ChannelConfigError> {
-                inner: Ok(()),
+                inner: il.set(ccfg),
             }));
         Promise::ok(())
     }
@@ -656,12 +720,11 @@ impl gen3rpc_capnp::ddc_channel::Server for DDCChannelImpl {
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let source_bin = pry!(params.get()).get_source_bin();
         let mut il = pry!(self.lock_mut());
-        il.source_bin = source_bin;
 
         response
             .get()
             .set_result(capnp_rpc::new_client(ResultImpl::<_, ChannelConfigError> {
-                inner: Ok(()),
+                inner: il.set_source(source_bin),
             }));
         Promise::ok(())
     }
@@ -673,12 +736,11 @@ impl gen3rpc_capnp::ddc_channel::Server for DDCChannelImpl {
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let ddc_freq = pry!(params.get()).get_ddc_freq();
         let mut il = pry!(self.lock_mut());
-        il.ddc_freq = ddc_freq;
 
         response
             .get()
             .set_result(capnp_rpc::new_client(ResultImpl::<_, ChannelConfigError> {
-                inner: Ok(()),
+                inner: il.set_ddc_freq(ddc_freq),
             }));
         Promise::ok(())
     }
@@ -690,12 +752,11 @@ impl gen3rpc_capnp::ddc_channel::Server for DDCChannelImpl {
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let rotation = pry!(params.get()).get_rotation();
         let mut il = pry!(self.lock_mut());
-        il.rotation = rotation;
 
         response
             .get()
             .set_result(capnp_rpc::new_client(ResultImpl::<_, ChannelConfigError> {
-                inner: Ok(()),
+                inner: il.set_rotation(rotation),
             }));
         Promise::ok(())
     }
@@ -707,13 +768,11 @@ impl gen3rpc_capnp::ddc_channel::Server for DDCChannelImpl {
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let center = pry!(pry!(params.get()).get_center());
         let mut il = pry!(self.lock_mut());
-        il.center.re = center.get_real();
-        il.center.im = center.get_imag();
 
         response
             .get()
             .set_result(capnp_rpc::new_client(ResultImpl::<_, ChannelConfigError> {
-                inner: Ok(()),
+                inner: il.set_center(Complex::new(center.get_real(), center.get_imag())),
             }));
         Promise::ok(())
     }
@@ -721,9 +780,14 @@ impl gen3rpc_capnp::ddc_channel::Server for DDCChannelImpl {
     fn get_baseband_frequency(
         &mut self,
         _: gen3rpc_capnp::ddc_channel::GetBasebandFrequencyParams,
-        _: gen3rpc_capnp::ddc_channel::GetBasebandFrequencyResults,
+        mut response: gen3rpc_capnp::ddc_channel::GetBasebandFrequencyResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        todo!()
+        let mut f = response.get().init_frequency().init_frequency();
+        let il = self.inner.read().unwrap();
+        let fr = il.get_baseband_freq();
+        f.set_numerator(*fr.numer());
+        f.set_denominator(*fr.denom());
+        Promise::ok(())
     }
 
     fn get_dest(
@@ -733,7 +797,7 @@ impl gen3rpc_capnp::ddc_channel::Server for DDCChannelImpl {
     ) -> capnp::capability::Promise<(), capnp::Error> {
         response
             .get()
-            .set_dest_bin(self.inner.read().unwrap().dest_bin);
+            .set_dest_bin(self.inner.read().unwrap().get_dest());
         Promise::ok(())
     }
 }
@@ -768,8 +832,9 @@ impl gen3rpc_capnp::capture::Server for CaptureImpl {
                 > {
                     inner: Ok(capnp_rpc::new_client(DroppableReferenceImpl {
                         state: Arc::new(RwLock::new(DRState::Exclusive)),
-                        inner: Arc::new(RwLock::new(Snap::Raw(v))),
+                        inner: Arc::new(RwLock::new(gen3_rpc::Snap::Raw(v))),
                         stale: false,
+                        phantom: PhantomData,
                     })),
                 }));
                 Promise::ok(())
@@ -805,8 +870,9 @@ impl gen3rpc_capnp::capture::Server for CaptureImpl {
                         > {
                             inner: Ok(capnp_rpc::new_client(DroppableReferenceImpl {
                                 state: Arc::new(RwLock::new(DRState::Exclusive)),
-                                inner: Arc::new(RwLock::new(Snap::DdcIQ(result))),
+                                inner: Arc::new(RwLock::new(gen3_rpc::Snap::DdcIQ(result))),
                                 stale: false,
+                                phantom: PhantomData,
                             })),
                         }));
                     }),
@@ -843,8 +909,9 @@ impl gen3rpc_capnp::capture::Server for CaptureImpl {
                         > {
                             inner: Ok(capnp_rpc::new_client(DroppableReferenceImpl {
                                 state: Arc::new(RwLock::new(DRState::Exclusive)),
-                                inner: Arc::new(RwLock::new(Snap::Phase(result))),
+                                inner: Arc::new(RwLock::new(gen3_rpc::Snap::Phase(result))),
                                 stale: false,
+                                phantom: PhantomData,
                             })),
                         }));
                     }),
@@ -871,7 +938,9 @@ impl capnp::traits::SetterInput<gen3rpc_capnp::dsp_scale::scale16::Owned> for Sc
     }
 }
 
-impl gen3rpc_capnp::dsp_scale::Server for DroppableReferenceImpl<DSPScaleMock> {
+impl<T: DSPScale> gen3rpc_capnp::dsp_scale::Server
+    for DroppableReferenceImpl<T, gen3rpc_capnp::dsp_scale::Client>
+{
     fn get_fft_scale(
         &mut self,
         _: gen3rpc_capnp::dsp_scale::GetFftScaleParams,
@@ -903,7 +972,9 @@ impl gen3rpc_capnp::dsp_scale::Server for DroppableReferenceImpl<DSPScaleMock> {
     }
 }
 
-impl gen3rpc_capnp::if_board::Server for DroppableReferenceImpl<IFBoardMock> {
+impl<T: IFBoard> gen3rpc_capnp::if_board::Server
+    for DroppableReferenceImpl<T, gen3rpc_capnp::if_board::Client>
+{
     fn get_freq(
         &mut self,
         _: gen3rpc_capnp::if_board::GetFreqParams,
@@ -965,7 +1036,9 @@ impl gen3rpc_capnp::if_board::Server for DroppableReferenceImpl<IFBoardMock> {
     }
 }
 
-impl gen3rpc_capnp::dac_table::Server for DroppableReferenceImpl<DACTableMock> {
+impl<T: DACTable> gen3rpc_capnp::dac_table::Server
+    for DroppableReferenceImpl<T, gen3rpc_capnp::dac_table::Client>
+{
     fn get(
         &mut self,
         _: gen3rpc_capnp::dac_table::GetParams,
@@ -1056,15 +1129,17 @@ impl gen3rpc_capnp::gen3_board::Server for Gen3BoardImpl {
     }
 }
 
-impl gen3rpc_capnp::snap::Server for SnapImpl {
+impl<T: Snap> gen3rpc_capnp::snap::Server
+    for DroppableReferenceImpl<T, gen3rpc_capnp::snap::Client>
+{
     fn get(
         &mut self,
         _: gen3rpc_capnp::snap::GetParams,
         mut results: gen3rpc_capnp::snap::GetResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
-        let b = self.inner.read().unwrap();
-        match b.deref() {
-            Snap::Raw(v) => {
+        let b = self.inner.read().unwrap().get();
+        match b {
+            gen3_rpc::Snap::Raw(v) => {
                 let mut bv = results.get().init_raw_iq(v.len() as u32);
                 for (i, c) in v.iter().enumerate() {
                     let mut bc = bv.reborrow().get(i as u32);
@@ -1072,7 +1147,7 @@ impl gen3rpc_capnp::snap::Server for SnapImpl {
                     bc.set_imag(c.im);
                 }
             }
-            Snap::DdcIQ(v) => {
+            gen3_rpc::Snap::DdcIQ(v) => {
                 let mut bv = results.get().init_ddc_iq(v.len() as u32);
                 for (i, cv) in v.iter().enumerate() {
                     let mut bcv = bv.reborrow().init(i as u32, cv.len() as u32);
@@ -1083,7 +1158,7 @@ impl gen3rpc_capnp::snap::Server for SnapImpl {
                     }
                 }
             }
-            Snap::Phase(v) => {
+            gen3_rpc::Snap::Phase(v) => {
                 let mut bv = results.get().init_phase(v.len() as u32);
                 for (i, pv) in v.iter().enumerate() {
                     let mut bpv = bv.reborrow().init(i as u32, pv.len() as u32);
@@ -1116,6 +1191,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         values: Box::new([Complex::i(); 524288]),
                     })),
                     stale: false,
+                    phantom: PhantomData,
                 },
                 capture: CaptureImpl {
                     inner: Arc::new(Mutex::new(())),
@@ -1124,6 +1200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     state: Arc::new(RwLock::new(DRState::Unshared)),
                     inner: Arc::new(RwLock::new(DSPScaleMock { fft: 0 })),
                     stale: false,
+                    phantom: PhantomData,
                 },
                 if_board: IFBoardImpl {
                     state: Arc::new(RwLock::new(DRState::Unshared)),
@@ -1135,6 +1212,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         },
                     })),
                     stale: false,
+                    phantom: PhantomData,
                 },
             });
 
