@@ -4,6 +4,8 @@ pub mod gen3rpc_capnp {
 
 pub mod client;
 
+use std::fmt::Display;
+
 use capnp::traits::{FromPointerBuilder, SetterInput};
 use num::Rational64;
 use num_complex::Complex;
@@ -433,10 +435,16 @@ impl SetterInput<gen3rpc_capnp::ddc::capabilities::Owned> for DDCCapabilities {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Attens {
     pub input: f32,
     pub output: f32,
+}
+
+impl Display for Attens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!("o{}dB->i{}dB", self.input, self.output))
+    }
 }
 
 impl SetterInput<gen3rpc_capnp::if_board::attens::Owned> for Attens {

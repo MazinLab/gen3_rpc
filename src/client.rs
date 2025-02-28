@@ -1,3 +1,8 @@
+use std::{
+    fmt::Debug,
+    ops::{Deref, DerefMut},
+};
+
 use crate::*;
 
 use super::gen3rpc_capnp;
@@ -13,7 +18,10 @@ use super::gen3rpc_capnp::rational::Reader as RatReader;
 use super::gen3rpc_capnp::result::result::Which as RWhich;
 use super::gen3rpc_capnp::snap::snap::Which as SWhich;
 
-use capnp::capability::FromClientHook;
+use capnp::{
+    capability::FromClientHook,
+    traits::{FromPointerReader, HasTypeId},
+};
 use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
 use futures;
 use futures_io::{AsyncRead, AsyncWrite};
@@ -128,6 +136,98 @@ impl<'a> From<C32Reader<'a>> for Complex<i32> {
     }
 }
 
+pub struct ClientState<T: FromClientHook + HasTypeId, S> {
+    client: T,
+    state: S,
+}
+
+impl<T: FromClientHook + HasTypeId, S: Debug> Debug for ClientState<T, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientState")
+            .field("state", &self.state)
+            .field("client", &"<omitted>")
+            .finish()
+    }
+}
+
+pub struct SharedDroppableReference<T: FromClientHook + HasTypeId, S> {
+    client: ClientState<T, S>,
+}
+
+pub struct ExclusiveDroppableReference<T: FromClientHook + HasTypeId, S> {
+    client: ClientState<T, S>,
+}
+
+impl<T: FromClientHook + HasTypeId, S> Deref for SharedDroppableReference<T, S> {
+    type Target = ClientState<T, S>;
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
+}
+
+impl<T: FromClientHook + HasTypeId, S> Deref for ExclusiveDroppableReference<T, S> {
+    type Target = ClientState<T, S>;
+    fn deref(&self) -> &Self::Target {
+        &self.client
+    }
+}
+
+impl<T: FromClientHook + HasTypeId, S> DerefMut for ExclusiveDroppableReference<T, S> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.client
+    }
+}
+
+impl<'a, T: FromClientHook + HasTypeId + FromPointerReader<'a>, S> SharedDroppableReference<T, S> {
+    pub async fn try_into_mut(
+        self,
+    ) -> Result<
+        Result<ExclusiveDroppableReference<T, S>, SharedDroppableReference<T, S>>,
+        capnp::Error,
+    > {
+        let SharedDroppableReference { client } = self;
+        let ClientState { client, state } = client;
+        let client: gen3rpc_capnp::droppable_reference::Client = client.cast_to();
+        let response = client.try_into_mut_request().send().promise.await?;
+        let maybemut = response.get()?.get_maybe_mut()?;
+        let mm = maybemut.get_request().send().promise.await?;
+        let mmr = mm.get()?;
+        let res: Result<_, _> = mmr.get_result()?.which()?.into();
+        Ok(match res {
+            Ok(t) => {
+                let b = t?.get_as_capability()?;
+                Ok(ExclusiveDroppableReference {
+                    client: ClientState { client: b, state },
+                })
+            }
+            Err(t) => Err(SharedDroppableReference {
+                client: ClientState {
+                    client: t?.get_as_capability()?,
+                    state,
+                },
+            }),
+        })
+    }
+}
+
+impl<'a, T: FromClientHook + HasTypeId + Unpin + FromPointerReader<'a>, S>
+    ExclusiveDroppableReference<T, S>
+{
+    pub async fn drop_mut(self) -> Result<SharedDroppableReference<T, S>, capnp::Error> {
+        let ExclusiveDroppableReference { client } = self;
+        let ClientState { client, state } = client;
+        let client: gen3rpc_capnp::droppable_reference::Client = client.cast_to();
+        let response = client.drop_mut_request().send().promise.await?;
+        let r = response.get()?.get_nonmut();
+        Ok(SharedDroppableReference {
+            client: ClientState {
+                client: r.get_as_capability()?,
+                state,
+            },
+        })
+    }
+}
+
 pub struct Gen3Board {
     pub client: gen3rpc_capnp::gen3_board::Client,
 }
@@ -137,9 +237,7 @@ pub struct DDC {
     client: gen3rpc_capnp::ddc::Client,
 }
 
-pub struct DACTable {
-    client: gen3rpc_capnp::dac_table::Client,
-}
+pub type DACTable = ClientState<gen3rpc_capnp::dac_table::Client, ()>;
 
 pub struct Capture {
     client: gen3rpc_capnp::capture::Client,
@@ -192,10 +290,15 @@ impl Gen3Board {
         })
     }
 
-    pub async fn get_dac_table(&self) -> Result<DACTable, capnp::Error> {
+    pub async fn get_dac_table(
+        &self,
+    ) -> Result<SharedDroppableReference<gen3rpc_capnp::dac_table::Client, ()>, capnp::Error> {
         let dac_table = self.client.get_dac_table_request().send().promise.await;
-        Ok(DACTable {
-            client: dac_table?.get()?.get_dac_table()?,
+        Ok(SharedDroppableReference {
+            client: DACTable {
+                client: dac_table?.get()?.get_dac_table()?,
+                state: (),
+            },
         })
     }
 
@@ -300,13 +403,13 @@ impl Capture {
             }
             Tap::DDCIQ(ddcs) => {
                 let mut taps = rtap.init_ddc_iq(ddcs.len() as u32);
-                for (i, ddc) in ddcs.into_iter().enumerate() {
+                for (i, ddc) in ddcs.iter().enumerate() {
                     taps.set(i as u32, ddc.client.clone().into_client_hook())
                 }
             }
             Tap::Phase(ddcs) => {
-                let mut taps = request.get().init_tap().init_phase(ddcs.len() as u32);
-                for (i, ddc) in ddcs.into_iter().enumerate() {
+                let mut taps = rtap.init_phase(ddcs.len() as u32);
+                for (i, ddc) in ddcs.iter().enumerate() {
                     taps.set(i as u32, ddc.client.clone().into_client_hook())
                 }
             }

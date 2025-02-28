@@ -16,21 +16,83 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use capnp::{capability::Promise, traits::FromPointerBuilder};
+use capnp::{
+    capability::{FromClientHook, Promise},
+    traits::FromPointerBuilder,
+};
 use capnp_rpc::{pry, rpc_twoparty_capnp, twoparty, RpcSystem};
 use futures::{future::try_join_all, AsyncReadExt, FutureExt, TryFutureExt};
 
-struct DSPScale {
+struct DSPScaleMock {
     fft: u16,
 }
 
-struct IFBoard {
+trait DSPScale {
+    fn set(&mut self, v: u16) -> Result<u16, u16>;
+    fn get(&self) -> u16;
+}
+
+impl DSPScale for DSPScaleMock {
+    fn set(&mut self, v: u16) -> Result<u16, u16> {
+        let vp = v & 0xfff;
+        self.fft = vp;
+        if vp == v {
+            Ok(vp)
+        } else {
+            Err(vp)
+        }
+    }
+
+    fn get(&self) -> u16 {
+        self.fft
+    }
+}
+
+struct IFBoardMock {
     lo: Hertz,
     attens: Attens,
 }
 
-struct DACTable {
+trait IFBoard {
+    fn set_lo(&mut self, v: Hertz) -> Result<Hertz, FrequencyError>;
+    fn get_lo(&self) -> Hertz;
+    fn set_attens(&mut self, a: Attens) -> Result<Attens, AttenError>;
+    fn get_attens(&self) -> Attens;
+}
+
+impl IFBoard for IFBoardMock {
+    fn set_lo(&mut self, v: Hertz) -> Result<Hertz, FrequencyError> {
+        self.lo = v;
+        Ok(v)
+    }
+    fn get_lo(&self) -> Hertz {
+        self.lo
+    }
+    fn set_attens(&mut self, a: Attens) -> Result<Attens, AttenError> {
+        self.attens = a;
+        Ok(a)
+    }
+    fn get_attens(&self) -> Attens {
+        self.attens
+    }
+}
+
+struct DACTableMock {
     values: Box<[Complex<i16>; 524288]>,
+}
+
+trait DACTable {
+    fn set(&mut self, v: Box<[Complex<i16>; 524288]>);
+    fn get(&self) -> Box<[Complex<i16>; 524288]>;
+}
+
+impl DACTable for DACTableMock {
+    fn set(&mut self, v: Box<[Complex<i16>; 524288]>) {
+        self.values = v;
+    }
+    fn get(&self) -> Box<[Complex<i16>; 524288]> {
+        self.values.clone()
+    }
 }
 
 struct Gen3BoardImpl {
@@ -68,6 +130,98 @@ impl<T> Drop for DroppableReferenceImpl<T> {
                 DRState::Shared(rc) => *i = DRState::Shared(rc - 1),
             }
         }
+    }
+}
+
+struct HiddenClient<T: Clone + FromClientHook> {
+    client: T,
+}
+
+// Probably need to send a PR so this can be derived from the implementation that follows
+impl<T: Clone + FromClientHook>
+    gen3rpc_capnp::result::Server<capnp::any_pointer::Owned, capnp::any_pointer::Owned>
+    for ResultImpl<HiddenClient<T>, HiddenClient<T>>
+{
+    fn get(
+        &mut self,
+        _: gen3rpc_capnp::result::GetParams<capnp::any_pointer::Owned, capnp::any_pointer::Owned>,
+        mut response: gen3rpc_capnp::result::GetResults<
+            capnp::any_pointer::Owned,
+            capnp::any_pointer::Owned,
+        >,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        let r = response.get().init_result();
+        match &self.inner {
+            Ok(t) => {
+                r.init_ok()
+                    .set_as_capability(t.client.clone().into_client_hook());
+            }
+            Err(e) => {
+                r.init_error()
+                    .set_as_capability(e.client.clone().into_client_hook());
+            }
+        }
+        Promise::ok(())
+    }
+    fn is_ok(
+        &mut self,
+        _: gen3rpc_capnp::result::IsOkParams<capnp::any_pointer::Owned, capnp::any_pointer::Owned>,
+        mut response: gen3rpc_capnp::result::IsOkResults<
+            capnp::any_pointer::Owned,
+            capnp::any_pointer::Owned,
+        >,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        response.get().set_some(self.inner.is_ok());
+        Promise::ok(())
+    }
+    fn unwrap(
+        &mut self,
+        _: gen3rpc_capnp::result::UnwrapParams<
+            capnp::any_pointer::Owned,
+            capnp::any_pointer::Owned,
+        >,
+        mut response: gen3rpc_capnp::result::UnwrapResults<
+            capnp::any_pointer::Owned,
+            capnp::any_pointer::Owned,
+        >,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        match &self.inner {
+            Ok(t) => {
+                response
+                    .get()
+                    .init_some()
+                    .set_as_capability(t.client.clone().into_client_hook());
+                Promise::ok(())
+            }
+            Err(_) => Promise::err(capnp::Error {
+                kind: capnp::ErrorKind::Failed,
+                extra: "Tried to unwrap an error".into(),
+            }),
+        }
+    }
+    fn unwrap_or(
+        &mut self,
+        params: gen3rpc_capnp::result::UnwrapOrParams<
+            capnp::any_pointer::Owned,
+            capnp::any_pointer::Owned,
+        >,
+        mut response: gen3rpc_capnp::result::UnwrapOrResults<
+            capnp::any_pointer::Owned,
+            capnp::any_pointer::Owned,
+        >,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        response
+            .get()
+            .init_result()
+            .set_as_capability(match &self.inner {
+                Ok(t) => t.client.clone().into_client_hook(),
+                Err(_) => {
+                    let p = pry!(pry!(params.get()).get_or());
+                    let k: T = pry!(p.clone().get_as_capability());
+                    k.into_client_hook()
+                }
+            });
+        Promise::ok(())
     }
 }
 
@@ -189,114 +343,123 @@ struct CaptureImpl {
     inner: Arc<Mutex<()>>,
 }
 
-type DSPScaleImpl = DroppableReferenceImpl<DSPScale>;
-type IFBoardImpl = DroppableReferenceImpl<IFBoard>;
-type DACTableImpl = DroppableReferenceImpl<DACTable>;
+macro_rules! droppable_reference {
+    ($inner_type:path, $client_type:path) => {
+        impl gen3rpc_capnp::droppable_reference::Server for DroppableReferenceImpl<$inner_type> {
+            fn drop(
+                &mut self,
+                _: gen3rpc_capnp::droppable_reference::DropParams,
+                _: gen3rpc_capnp::droppable_reference::DropResults,
+            ) -> capnp::capability::Promise<(), capnp::Error> {
+                let mut i = self.state.write().unwrap();
+                match *i {
+                    DRState::Unshared => unreachable!(),
+                    DRState::Exclusive => {
+                        *i = DRState::Unshared;
+                    }
+                    DRState::Shared(1) => {
+                        *i = DRState::Unshared;
+                    }
+                    DRState::Shared(rc) => {
+                        *i = DRState::Shared(rc - 1);
+                    }
+                }
+                Promise::ok(())
+            }
+
+            fn is_mut(
+                &mut self,
+                _: gen3rpc_capnp::droppable_reference::IsMutParams,
+                mut response: gen3rpc_capnp::droppable_reference::IsMutResults,
+            ) -> capnp::capability::Promise<(), capnp::Error> {
+                let i = self.state.read().unwrap();
+                match *i {
+                    DRState::Unshared => unreachable!(),
+                    DRState::Exclusive => {
+                        response.get().set_mutable(true);
+                    }
+                    DRState::Shared(_) => {
+                        response.get().set_mutable(false);
+                    }
+                }
+                Promise::ok(())
+            }
+
+            fn drop_mut(
+                &mut self,
+                _: gen3rpc_capnp::droppable_reference::DropMutParams,
+                mut response: gen3rpc_capnp::droppable_reference::DropMutResults,
+            ) -> capnp::capability::Promise<(), capnp::Error> {
+                let mut i = self.state.write().unwrap();
+                *i = DRState::Shared(1);
+                self.stale = true;
+                let c: $client_type = capnp_rpc::new_client(DroppableReferenceImpl {
+                    state: self.state.clone(),
+                    inner: self.inner.clone(),
+                    stale: false,
+                });
+                response
+                    .get()
+                    .init_nonmut()
+                    .set_as_capability(c.into_client_hook());
+                Promise::ok(())
+            }
+
+            fn try_into_mut(
+                &mut self,
+                _: gen3rpc_capnp::droppable_reference::TryIntoMutParams,
+                mut response: gen3rpc_capnp::droppable_reference::TryIntoMutResults,
+            ) -> capnp::capability::Promise<(), capnp::Error> {
+                println!("Attpmption to turn something into a mutable ref");
+                let mut i = self.state.write().unwrap();
+                let resimp = match *i {
+                    DRState::Unshared => unreachable!(),
+                    DRState::Shared(1) | DRState::Exclusive => {
+                        self.stale = true;
+                        *i = DRState::Exclusive;
+
+                        let d: $client_type = capnp_rpc::new_client(DroppableReferenceImpl {
+                            state: self.state.clone(),
+                            inner: self.inner.clone(),
+                            stale: false,
+                        });
+                        let c = HiddenClient { client: d };
+                        ResultImpl { inner: Ok(c) }
+                    }
+                    DRState::Shared(_) => {
+                        self.stale = true;
+
+                        let d: $client_type = capnp_rpc::new_client(DroppableReferenceImpl {
+                            state: self.state.clone(),
+                            inner: self.inner.clone(),
+                            stale: false,
+                        });
+                        let c = HiddenClient { client: d };
+                        ResultImpl { inner: Err(c) }
+                    }
+                };
+                let c = capnp_rpc::new_client(resimp);
+                response.get().set_maybe_mut(c);
+                Promise::ok(())
+            }
+        }
+    };
+}
+
+type DSPScaleImpl = DroppableReferenceImpl<DSPScaleMock>;
+type IFBoardImpl = DroppableReferenceImpl<IFBoardMock>;
+type DACTableImpl = DroppableReferenceImpl<DACTableMock>;
 type SnapImpl = DroppableReferenceImpl<Snap>;
 type DDCChannelImpl = DroppableReferenceImpl<ActualizedDDCChannelConfig>;
 
-impl<T> gen3rpc_capnp::droppable_reference::Server for DroppableReferenceImpl<T> {
-    fn drop(
-        &mut self,
-        _: gen3rpc_capnp::droppable_reference::DropParams,
-        _: gen3rpc_capnp::droppable_reference::DropResults,
-    ) -> capnp::capability::Promise<(), capnp::Error> {
-        let mut i = self.state.write().unwrap();
-        match *i {
-            DRState::Unshared => unreachable!(),
-            DRState::Exclusive => {
-                *i = DRState::Unshared;
-            }
-            DRState::Shared(1) => {
-                *i = DRState::Unshared;
-            }
-            DRState::Shared(rc) => {
-                *i = DRState::Shared(rc - 1);
-            }
-        }
-        Promise::ok(())
-    }
-
-    fn is_mut(
-        &mut self,
-        _: gen3rpc_capnp::droppable_reference::IsMutParams,
-        mut response: gen3rpc_capnp::droppable_reference::IsMutResults,
-    ) -> capnp::capability::Promise<(), capnp::Error> {
-        let i = self.state.read().unwrap();
-        match *i {
-            DRState::Unshared => unreachable!(),
-            DRState::Exclusive => {
-                response.get().set_mutable(true);
-            }
-            DRState::Shared(_) => {
-                response.get().set_mutable(false);
-            }
-        }
-        Promise::ok(())
-    }
-
-    fn drop_mut(
-        &mut self,
-        _: gen3rpc_capnp::droppable_reference::DropMutParams,
-        mut response: gen3rpc_capnp::droppable_reference::DropMutResults,
-    ) -> capnp::capability::Promise<(), capnp::Error> {
-        let mut i = self.state.write().unwrap();
-        *i = DRState::Shared(1);
-        self.stale = true;
-        response
-            .get()
-            .set_nonmut(capnp_rpc::new_client(DroppableReferenceImpl {
-                state: self.state.clone(),
-                inner: Arc::clone(&self.inner),
-                stale: false,
-            }));
-        Promise::ok(())
-    }
-
-    fn try_into_mut(
-        &mut self,
-        _: gen3rpc_capnp::droppable_reference::TryIntoMutParams,
-        mut response: gen3rpc_capnp::droppable_reference::TryIntoMutResults,
-    ) -> capnp::capability::Promise<(), capnp::Error> {
-        let mut i = self.state.write().unwrap();
-        match *i {
-            DRState::Unshared => unreachable!(),
-            DRState::Shared(1) | DRState::Exclusive => {
-                self.stale = true;
-                *i = DRState::Exclusive;
-
-                let resimp: ResultImpl<
-                    gen3rpc_capnp::droppable_reference::Client,
-                    gen3rpc_capnp::droppable_reference::Client,
-                > = ResultImpl {
-                    inner: Ok(capnp_rpc::new_client(DroppableReferenceImpl {
-                        state: self.state.clone(),
-                        inner: Arc::clone(&self.inner),
-                        stale: false,
-                    })),
-                };
-                response.get().set_maybe_mut(capnp_rpc::new_client(resimp));
-            }
-            DRState::Shared(_) => {
-                self.stale = true;
-                *i = DRState::Exclusive;
-
-                let resimp: ResultImpl<
-                    gen3rpc_capnp::droppable_reference::Client,
-                    gen3rpc_capnp::droppable_reference::Client,
-                > = ResultImpl {
-                    inner: Err(capnp_rpc::new_client(DroppableReferenceImpl {
-                        state: self.state.clone(),
-                        inner: Arc::clone(&self.inner),
-                        stale: false,
-                    })),
-                };
-                response.get().set_maybe_mut(capnp_rpc::new_client(resimp));
-            }
-        }
-        Promise::ok(())
-    }
-}
+droppable_reference!(DSPScaleMock, gen3rpc_capnp::dsp_scale::Client);
+droppable_reference!(IFBoardMock, gen3rpc_capnp::if_board::Client);
+droppable_reference!(DACTableMock, gen3rpc_capnp::dac_table::Client);
+droppable_reference!(Snap, gen3rpc_capnp::snap::Client);
+droppable_reference!(
+    ActualizedDDCChannelConfig,
+    gen3rpc_capnp::ddc_channel::Client
+);
 
 impl DDCImpl {
     fn allocate_channel_inner(
@@ -707,14 +870,15 @@ impl capnp::traits::SetterInput<gen3rpc_capnp::dsp_scale::scale16::Owned> for Sc
         Ok(())
     }
 }
-impl gen3rpc_capnp::dsp_scale::Server for DSPScaleImpl {
+
+impl gen3rpc_capnp::dsp_scale::Server for DroppableReferenceImpl<DSPScaleMock> {
     fn get_fft_scale(
         &mut self,
         _: gen3rpc_capnp::dsp_scale::GetFftScaleParams,
         mut response: gen3rpc_capnp::dsp_scale::GetFftScaleResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let mut s16 = response.get().init_scale();
-        s16.set_scale(self.inner.read().unwrap().fft);
+        s16.set_scale(self.inner.read().unwrap().get());
         Promise::ok(())
     }
 
@@ -724,17 +888,14 @@ impl gen3rpc_capnp::dsp_scale::Server for DSPScaleImpl {
         mut response: gen3rpc_capnp::dsp_scale::SetFftScaleResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let s16 = pry!(pry!(params.get()).get_scale()).get_scale();
-        {
-            let mut i = self.inner.write().unwrap();
-            i.fft = s16 & 0xfff;
-            println!("Set FFT Scale to {:03x}", i.fft);
-        }
         let resimp = ResultImpl {
-            inner: if s16 == s16 & 0xfff {
-                Ok(Scale16 { scale: s16 & 0xfff })
-            } else {
-                Err(Scale16 { scale: s16 & 0xfff })
-            },
+            inner: self
+                .inner
+                .write()
+                .unwrap()
+                .set(s16)
+                .map(|scale| Scale16 { scale })
+                .map_err(|scale| Scale16 { scale }),
         };
         let client = capnp_rpc::new_client(resimp);
         response.get().set_scale(client);
@@ -742,7 +903,7 @@ impl gen3rpc_capnp::dsp_scale::Server for DSPScaleImpl {
     }
 }
 
-impl gen3rpc_capnp::if_board::Server for IFBoardImpl {
+impl gen3rpc_capnp::if_board::Server for DroppableReferenceImpl<IFBoardMock> {
     fn get_freq(
         &mut self,
         _: gen3rpc_capnp::if_board::GetFreqParams,
@@ -750,8 +911,8 @@ impl gen3rpc_capnp::if_board::Server for IFBoardImpl {
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let mut f = response.get().init_freq().init_frequency();
         let l = self.inner.read().unwrap();
-        f.set_numerator(*l.lo.numer());
-        f.set_denominator(*l.lo.denom());
+        f.set_numerator(*l.get_lo().numer());
+        f.set_denominator(*l.get_lo().denom());
         Promise::ok(())
     }
 
@@ -762,12 +923,10 @@ impl gen3rpc_capnp::if_board::Server for IFBoardImpl {
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let pf = pry!(pry!(pry!(params.get()).get_freq()).get_frequency());
         let mut l = self.inner.write().unwrap();
-        l.lo = Hertz::new(pf.get_numerator(), pf.get_denominator());
-        println!("Setting LO Freq to {}", l.lo);
         response
             .get()
             .set_freq(capnp_rpc::new_client(ResultImpl::<_, FrequencyError> {
-                inner: Ok(Hertz::new(pf.get_numerator(), pf.get_denominator())),
+                inner: l.set_lo(Hertz::new(pf.get_numerator(), pf.get_denominator())),
             }));
         Promise::ok(())
     }
@@ -779,8 +938,9 @@ impl gen3rpc_capnp::if_board::Server for IFBoardImpl {
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let mut a = response.get().init_attens();
         let l = self.inner.read().unwrap();
-        a.set_input(l.attens.input);
-        a.set_output(l.attens.output);
+        let attens = l.get_attens();
+        a.set_input(attens.input);
+        a.set_output(attens.output);
         Promise::ok(())
     }
 
@@ -790,33 +950,31 @@ impl gen3rpc_capnp::if_board::Server for IFBoardImpl {
         mut response: gen3rpc_capnp::if_board::SetAttensResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let pa = pry!(pry!(params.get()).get_attens());
+        let attens = Attens {
+            input: pa.get_input(),
+            output: pa.get_output(),
+        };
         let mut l = self.inner.write().unwrap();
-        l.attens.input = (pa.get_input() * 4.).round() / 4.;
-        l.attens.output = (pa.get_input() * 4.).round() / 4.;
-        println!("Setting attenuation to {:#?}", l.attens);
-
         response
             .get()
             .set_attens(capnp_rpc::new_client(ResultImpl::<_, AttenError> {
-                inner: Ok(Attens {
-                    input: l.attens.input,
-                    output: l.attens.output,
-                }),
+                inner: l.set_attens(attens),
             }));
 
         Promise::ok(())
     }
 }
 
-impl gen3rpc_capnp::dac_table::Server for DACTableImpl {
+impl gen3rpc_capnp::dac_table::Server for DroppableReferenceImpl<DACTableMock> {
     fn get(
         &mut self,
         _: gen3rpc_capnp::dac_table::GetParams,
         mut response: gen3rpc_capnp::dac_table::GetResults,
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let inner = self.inner.read().unwrap();
-        response.get().init_data(inner.values.len() as u32);
-        for (i, val) in inner.values.iter().enumerate() {
+        let values = inner.get();
+        response.get().init_data(values.len() as u32);
+        for (i, val) in values.iter().enumerate() {
             let mut v = pry!(response.get().get_data()).get(i as u32);
             v.set_real(val.re);
             v.set_imag(val.im);
@@ -832,11 +990,14 @@ impl gen3rpc_capnp::dac_table::Server for DACTableImpl {
         let replace = pry!(pry!(pry!(params.get()).get_replace()).get_data());
         println!("Setting DacTable");
 
-        let mut i = self.inner.write().unwrap();
+        let mut values = Box::new([Complex::new(0, 0); 524288]);
+        assert_eq!(values.len(), replace.len() as usize);
+
         for k in 0..replace.len() {
-            i.values[k as usize] =
-                Complex::new(replace.get(k).get_real(), replace.get(k).get_imag())
+            values[k as usize] = Complex::new(replace.get(k).get_real(), replace.get(k).get_imag())
         }
+        let mut i = self.inner.write().unwrap();
+        i.set(values);
 
         Promise::ok(())
     }
@@ -951,7 +1112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 dac_table: DACTableImpl {
                     state: Arc::new(RwLock::new(DRState::Unshared)),
-                    inner: Arc::new(RwLock::new(DACTable {
+                    inner: Arc::new(RwLock::new(DACTableMock {
                         values: Box::new([Complex::i(); 524288]),
                     })),
                     stale: false,
@@ -961,12 +1122,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 dsp_scale: DSPScaleImpl {
                     state: Arc::new(RwLock::new(DRState::Unshared)),
-                    inner: Arc::new(RwLock::new(DSPScale { fft: 0 })),
+                    inner: Arc::new(RwLock::new(DSPScaleMock { fft: 0 })),
                     stale: false,
                 },
                 if_board: IFBoardImpl {
                     state: Arc::new(RwLock::new(DRState::Unshared)),
-                    inner: Arc::new(RwLock::new(IFBoard {
+                    inner: Arc::new(RwLock::new(IFBoardMock {
                         lo: Hertz::new(6_000_000_000, 1),
                         attens: Attens {
                             input: 10.,

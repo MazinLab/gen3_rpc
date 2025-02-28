@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             tokio::task::spawn_local(rpc_system);
 
-            let mut dactable = board.get_dac_table().await?;
+            let dactable = board.get_dac_table().await?;
             let mut dsp_scale = board.get_dsp_scale().await?;
             let ddc = board.get_ddc().await?;
             let capture = board.get_capture().await?;
@@ -63,7 +63,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             d[0].re = 8;
             d[1].im = 32;
             d[2].re = 0x55;
-            dactable.set_dac_table(d).await?;
+            let mut dactable = dactable.try_into_mut().await?.unwrap_or_else(|_| todo!());
+            dactable.set_dac_table(d).await.unwrap();
 
             let p = dactable.get_dac_table().await?;
             println!("DAC Table After: {:?}", p[..16].iter().collect::<Vec<_>>());
@@ -78,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Set Invalid Scale: {:?}", scale);
 
             println!(
-                "Allocating DDC Channels Second Allocation will fail if server not restarted ATM"
+                "Allocating DDC Channels; Second Allocation will fail if server not restarted ATM"
             );
             let channela = ddc
                 .allocate_channel(DDCChannelConfig {

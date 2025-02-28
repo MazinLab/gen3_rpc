@@ -60,8 +60,8 @@ struct Hertz {
 interface DroppableReference {
   drop @0 ();
   isMut @1 () -> (mutable: Bool);
-  dropMut @2 () -> (nonmut: DroppableReference) $mut;
-  tryIntoMut @3() -> (maybeMut: Result(DroppableReference, DroppableReference));
+  dropMut @2 () -> (nonmut: AnyPointer) $mut;
+  tryIntoMut @3() -> (maybeMut: Result(AnyPointer, AnyPointer));
 }
 
 interface IfBoard extends(DroppableReference) {
