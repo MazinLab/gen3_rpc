@@ -324,6 +324,44 @@ impl SetterInput<gen3rpc_capnp::snap::snap::Owned> for Snap {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum SnapAvg {
+    Raw(Complex<f64>),
+    DdcIQ(Vec<Complex<f64>>),
+    Phase(Vec<f64>),
+}
+
+impl SetterInput<gen3rpc_capnp::snap::snap_avg::Owned> for SnapAvg {
+    fn set_pointer_builder(
+        builder: capnp::private::layout::PointerBuilder<'_>,
+        input: Self,
+        _canonicalize: bool,
+    ) -> capnp::Result<()> {
+        let builder = gen3rpc_capnp::snap::snap_avg::Builder::init_pointer(builder, 1);
+        match input {
+            Self::Raw(c) => {
+                let mut bc = builder.init_raw_iq();
+                bc.set_real(c.re);
+                bc.set_imag(c.im);
+            }
+            Self::DdcIQ(v) => {
+                let mut bv = builder.init_ddc_iq(v.len() as u32);
+                for (i, bc) in v.iter().enumerate() {
+                    bv.reborrow().get(i as u32).set_real(bc.re);
+                    bv.reborrow().get(i as u32).set_imag(bc.im);
+                }
+            }
+            Self::Phase(v) => {
+                let mut bv = builder.init_phase(v.len() as u32);
+                for (i, pv) in v.iter().enumerate() {
+                    bv.set(i as u32, *pv);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 pub enum BinControl {
     FullSwizzle,
     None,

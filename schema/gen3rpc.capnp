@@ -20,6 +20,11 @@ struct ComplexInt32 {
   imag @1 :Int32;
 }
 
+struct ComplexFloat64 {
+  real @0 :Float64;
+  imag @1 :Float64;
+}
+
 struct VoidStruct {}
 
 # Do to limitations in the capnp encoding these need to be pointer types
@@ -193,7 +198,16 @@ interface Snap extends(DroppableReference) {
     }
   }
 
+  struct SnapAvg {
+    union {
+      rawIq @0: ComplexFloat64;
+      ddcIq @1: List(ComplexFloat64);
+      phase @2: List(Float64);
+    }
+  }
+
   get @0 () -> Snap;
+  average @1 () -> SnapAvg;
 }
 
 interface Capture {
@@ -214,7 +228,7 @@ interface Capture {
   }
 
   capture @0 (tap: CaptureTap, length: UInt64) -> (result: Result(Snap, CaptureError));
-  average @1 (tap: CaptureTap, length: UInt64) -> (result: Result(Snap, CaptureError));
+  average @1 (tap: CaptureTap, length: UInt64) -> (result: Result(Snap.SnapAvg, CaptureError));
 }
 
 struct RfChain {

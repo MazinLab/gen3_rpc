@@ -47,8 +47,8 @@ pub struct RFChain<'a> {
 
 pub enum Tap<'a> {
     RawIQ,
-    DDCIQ(&'a [&'a DDCChannel]),
-    Phase(&'a [&'a DDCChannel]),
+    DDCIQ(&'a [&'a SharedDroppableReference<gen3rpc_capnp::ddc_channel::Client, ()>]),
+    Phase(&'a [&'a SharedDroppableReference<gen3rpc_capnp::ddc_channel::Client, ()>]),
 }
 
 impl<T, E> From<RWhich<T, E>> for Result<T, E> {
@@ -150,10 +150,12 @@ impl<T: FromClientHook + HasTypeId, S: Debug> Debug for ClientState<T, S> {
     }
 }
 
+#[derive(Debug)]
 pub struct SharedDroppableReference<T: FromClientHook + HasTypeId, S> {
     client: ClientState<T, S>,
 }
 
+#[derive(Debug)]
 pub struct ExclusiveDroppableReference<T: FromClientHook + HasTypeId, S> {
     client: ClientState<T, S>,
 }
@@ -243,17 +245,9 @@ pub struct Capture {
     client: gen3rpc_capnp::capture::Client,
 }
 
-pub struct IFBoard {
-    client: gen3rpc_capnp::if_board::Client,
-}
-
-pub struct DSPScale {
-    client: gen3rpc_capnp::dsp_scale::Client,
-}
-
-pub struct DDCChannel {
-    client: gen3rpc_capnp::ddc_channel::Client,
-}
+pub type IFBoard = ClientState<gen3rpc_capnp::if_board::Client, ()>;
+pub type DSPScale = ClientState<gen3rpc_capnp::dsp_scale::Client, ()>;
+pub type DDCChannel = ClientState<gen3rpc_capnp::ddc_channel::Client, ()>;
 
 impl Gen3Board {
     pub fn new<T, U>(read: T, write: U) -> Self
@@ -309,17 +303,27 @@ impl Gen3Board {
         })
     }
 
-    pub async fn get_dsp_scale(&self) -> Result<DSPScale, capnp::Error> {
+    pub async fn get_dsp_scale(
+        &self,
+    ) -> Result<SharedDroppableReference<gen3rpc_capnp::dsp_scale::Client, ()>, capnp::Error> {
         let dsp_scale = self.client.get_dsp_scale_request().send().promise.await;
-        Ok(DSPScale {
-            client: dsp_scale?.get()?.get_dsp_scale()?,
+        Ok(SharedDroppableReference {
+            client: DSPScale {
+                client: dsp_scale?.get()?.get_dsp_scale()?,
+                state: (),
+            },
         })
     }
 
-    pub async fn get_if_board(&self) -> Result<IFBoard, capnp::Error> {
+    pub async fn get_if_board(
+        &self,
+    ) -> Result<SharedDroppableReference<gen3rpc_capnp::if_board::Client, ()>, capnp::Error> {
         let ifboard = self.client.get_if_board_request().send().promise.await;
-        Ok(IFBoard {
-            client: ifboard?.get()?.get_if_board()?,
+        Ok(SharedDroppableReference {
+            client: IFBoard {
+                client: ifboard?.get()?.get_if_board()?,
+                state: (),
+            },
         })
     }
 }
@@ -328,7 +332,10 @@ impl DDC {
     pub async fn allocate_channel(
         &self,
         config: DDCChannelConfig,
-    ) -> Result<DDCChannel, ChannelAllocationError> {
+    ) -> Result<
+        SharedDroppableReference<gen3rpc_capnp::ddc_channel::Client, ()>,
+        ChannelAllocationError,
+    > {
         let mut request = self.client.allocate_channel_request();
         let mut cp_config = request.get().init_config();
         cp_config.set_source_bin(config.source_bin);
@@ -352,17 +359,26 @@ impl DDC {
 
         let client: Result<_, _> = result.get()?.get_result()?.which()?.into();
         match client {
-            Ok(p) => Ok(DDCChannel { client: p? }),
+            Ok(p) => Ok(SharedDroppableReference {
+                client: DDCChannel {
+                    client: p?,
+                    state: (),
+                },
+            }),
             Err(e) => {
                 let e = e?;
                 Err(e.which()?.into())
             }
         }
     }
+
     pub async fn retrieve_channel(
         &self,
         config: DDCChannelConfig,
-    ) -> Result<Option<DDCChannel>, capnp::Error> {
+    ) -> Result<
+        Option<SharedDroppableReference<gen3rpc_capnp::ddc_channel::Client, ()>>,
+        capnp::Error,
+    > {
         let mut request = self.client.retrieve_channel_request();
         let mut cp_config = request.get().init_config();
         cp_config.set_source_bin(config.source_bin);
@@ -384,7 +400,13 @@ impl DDC {
             .promise
             .await?;
         let client: Option<Result<_, _>> = option.get()?.get_option()?.which()?.into();
-        client.map_or(Ok(None), |v| v.map(|client| Some(DDCChannel { client })))
+        client.map_or(Ok(None), |v| {
+            v.map(|client| {
+                Some(SharedDroppableReference {
+                    client: DDCChannel { client, state: () },
+                })
+            })
+        })
     }
 }
 
@@ -404,13 +426,13 @@ impl Capture {
             Tap::DDCIQ(ddcs) => {
                 let mut taps = rtap.init_ddc_iq(ddcs.len() as u32);
                 for (i, ddc) in ddcs.iter().enumerate() {
-                    taps.set(i as u32, ddc.client.clone().into_client_hook())
+                    taps.set(i as u32, ddc.client.client.clone().into_client_hook())
                 }
             }
             Tap::Phase(ddcs) => {
                 let mut taps = rtap.init_phase(ddcs.len() as u32);
                 for (i, ddc) in ddcs.iter().enumerate() {
-                    taps.set(i as u32, ddc.client.clone().into_client_hook())
+                    taps.set(i as u32, ddc.client.client.clone().into_client_hook())
                 }
             }
         }

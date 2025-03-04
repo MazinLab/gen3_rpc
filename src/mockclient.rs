@@ -37,10 +37,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::task::spawn_local(rpc_system);
 
             let dactable = board.get_dac_table().await?;
-            let mut dsp_scale = board.get_dsp_scale().await?;
+            let mut dsp_scale = board.get_dsp_scale().await?.try_into_mut().await?.unwrap_or_else(|_| todo!());
             let ddc = board.get_ddc().await?;
             let capture = board.get_capture().await?;
-            let mut ifboard = board.get_if_board().await?;
+            let mut ifboard = board.get_if_board().await?.try_into_mut().await?.unwrap_or_else(|_| todo!());
 
             println!(
                 "Setting IFBoard Freq: {:#?}",
