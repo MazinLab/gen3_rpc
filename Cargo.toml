@@ -1,36 +1,3 @@
-[package]
-name = "gen3_rpc"
-version = "0.1.0"
-edition = "2021"
-include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "build.rs", "schema/*", "Cargo.toml"]
-build = "build.rs"
-license = "MIT OR Apache-2.0"
-description = "RFSoC Gen3 MKID Readout RPC Interface"
-homepage = "https://github.com/MazinLab/gen3_rpc"
-repository = "https://github.com/MazinLab/gen3_rpc"
-
-[dependencies]
-capnp = "0.20.3"
-capnp-rpc = "0.20.3"
-futures = "0.3.31"
-futures-io = "0.3.31"
-num = "0.4.3"
-num-complex = "0.4.6"
-rand = "0.9.0"
-tokio = { version = "1.43.0", features = ["macros", "net", "rt", "tokio-macros"] }
-tokio-util = { version = "0.7.13", features = ["net", "compat"] }
-
-[lib]
-name = "gen3_rpc"
-path = "src/lib.rs"
-
-[[bin]]
-name = "mock"
-path = "src/mock.rs"
-
-[[bin]]
-name = "mockclient"
-path = "src/mockclient.rs"
-
-[build-dependencies]
-capnpc = "0.20.1"
+[workspace]
+resolver = "2"
+members = ["gen3_rpc", "mock"]

@@ -1,8 +1,8 @@
-use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
+use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
 use futures::AsyncReadExt;
 use gen3_rpc::{
-    client::{self, CaptureTap, RFChain, Tap},
     Attens, DDCChannelConfig, Hertz,
+    client::{self, CaptureTap, RFChain, Tap},
 };
 use num_complex::Complex;
 use std::net::{Ipv4Addr, SocketAddrV4};
