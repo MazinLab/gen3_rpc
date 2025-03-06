@@ -1,7 +1,7 @@
 use gen3_rpc::{
-    gen3rpc_capnp::{self},
     ActualizedDDCChannelConfig, AttenError, Attens, CaptureError, ChannelAllocationError,
     DDCCapabilities, DDCChannelConfig, FrequencyError, Hertz, SnapAvg,
+    gen3rpc_capnp::{self},
 };
 
 use num::Complex;
@@ -9,7 +9,7 @@ use num::Complex;
 use gen3_rpc::server::*;
 
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{HashMap, hash_map::Entry},
     marker::PhantomData,
     net::{Ipv4Addr, SocketAddrV4},
     ops::Shr,
@@ -17,7 +17,7 @@ use std::{
 };
 
 use capnp::capability::Promise;
-use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
+use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
 use futures::{AsyncReadExt, TryFutureExt};
 
 struct DSPScaleMock {
@@ -28,11 +28,7 @@ impl DSPScale for DSPScaleMock {
     fn set(&mut self, v: u16) -> Result<u16, u16> {
         let vp = v & 0xfff;
         self.fft = vp;
-        if vp == v {
-            Ok(vp)
-        } else {
-            Err(vp)
-        }
+        if vp == v { Ok(vp) } else { Err(vp) }
     }
 
     fn get(&self) -> u16 {
@@ -137,7 +133,7 @@ impl DDCImpl {
                                 });
                             }
                             DRState::Exclusive => {
-                                return Err(ChannelAllocationError::DestinationInUse)
+                                return Err(ChannelAllocationError::DestinationInUse);
                             }
                             DRState::Shared(i) => {
                                 if exclusive {
@@ -404,15 +400,12 @@ impl gen3rpc_capnp::gen3_board::Server for Gen3BoardImpl {
     }
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn mockserver(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     tokio::task::LocalSet::new()
         .run_until(async move {
-            let listener = tokio::net::TcpListener::bind(SocketAddrV4::new(
-                Ipv4Addr::new(127, 0, 0, 1),
-                54321,
-            ))
-            .await?;
+            let listener =
+                tokio::net::TcpListener::bind(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port))
+                    .await?;
             let client: gen3rpc_capnp::gen3_board::Client = capnp_rpc::new_client(Gen3BoardImpl {
                 ddc: DDCImpl {
                     inner: Arc::new(Mutex::new(HashMap::new())),

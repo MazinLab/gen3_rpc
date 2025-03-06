@@ -7,15 +7,10 @@ use gen3_rpc::{
 use num_complex::Complex;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std::error::Error>> {
     tokio::task::LocalSet::new()
         .run_until(async move {
-            let stream = tokio::net::TcpStream::connect(SocketAddrV4::new(
-                Ipv4Addr::new(127, 0, 0, 1),
-                54321,
-            ))
-            .await?;
+            let stream = tokio::net::TcpStream::connect(SocketAddrV4::new(address, port)).await?;
             stream.set_nodelay(true)?;
             let (reader, writer) =
                 tokio_util::compat::TokioAsyncReadCompatExt::compat(stream).split();
