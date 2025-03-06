@@ -3,6 +3,7 @@ pub mod gen3rpc_capnp {
 }
 
 pub mod client;
+pub mod server;
 
 use std::fmt::Display;
 
@@ -375,7 +376,19 @@ pub struct ErasedDDCChannelConfig {
     pub center: Complex<i32>,
 }
 
-#[derive(Clone, Debug)]
+impl ErasedDDCChannelConfig {
+    pub fn with_dest(&self, dest_bin: u32) -> ActualizedDDCChannelConfig {
+        ActualizedDDCChannelConfig {
+            source_bin: self.source_bin,
+            ddc_freq: self.ddc_freq,
+            dest_bin,
+            rotation: self.rotation,
+            center: self.center,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActualizedDDCChannelConfig {
     pub source_bin: u32,
     pub ddc_freq: i32,
@@ -403,7 +416,7 @@ impl DDCChannelConfig {
         }
     }
 
-    pub fn actualize(self) -> Result<ActualizedDDCChannelConfig, DDCChannelConfig> {
+    pub fn actualize(self) -> Result<ActualizedDDCChannelConfig, ErasedDDCChannelConfig> {
         if let Some(dest) = self.dest_bin {
             Ok(ActualizedDDCChannelConfig {
                 source_bin: self.source_bin,
@@ -413,7 +426,7 @@ impl DDCChannelConfig {
                 center: self.center,
             })
         } else {
-            Err(self)
+            Err(self.erase())
         }
     }
 }
@@ -440,6 +453,31 @@ impl SetterInput<gen3rpc_capnp::ddc_channel::channel_config::Owned> for DDCChann
             None => db.set_none(()),
         }
         Ok(())
+    }
+}
+
+impl TryFrom<gen3rpc_capnp::ddc_channel::channel_config::Reader<'_>> for DDCChannelConfig {
+    type Error = capnp::Error;
+    fn try_from(
+        value: gen3rpc_capnp::ddc_channel::channel_config::Reader<'_>,
+    ) -> Result<Self, Self::Error> {
+        Ok(DDCChannelConfig {
+            source_bin: value.get_source_bin(),
+            ddc_freq: value.get_ddc_freq(),
+            dest_bin: match value.get_destination_bin().which()? {
+                gen3rpc_capnp::ddc_channel::channel_config::destination_bin::Which::None(()) => {
+                    None
+                }
+                gen3rpc_capnp::ddc_channel::channel_config::destination_bin::Which::Some(t) => {
+                    Some(t)
+                }
+            },
+            rotation: value.get_rotation(),
+            center: Complex {
+                re: value.get_center()?.get_real(),
+                im: value.get_center()?.get_imag(),
+            },
+        })
     }
 }
 
@@ -494,6 +532,23 @@ impl SetterInput<gen3rpc_capnp::if_board::attens::Owned> for Attens {
         let mut builder = gen3rpc_capnp::if_board::attens::Builder::init_pointer(builder, 1);
         builder.set_input(input.input);
         builder.set_output(input.output);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Scale16 {
+    scale: u16,
+}
+
+impl capnp::traits::SetterInput<gen3rpc_capnp::dsp_scale::scale16::Owned> for Scale16 {
+    fn set_pointer_builder(
+        builder: capnp::private::layout::PointerBuilder<'_>,
+        input: Self,
+        _canonicalize: bool,
+    ) -> capnp::Result<()> {
+        let mut builder = gen3rpc_capnp::dsp_scale::scale16::Builder::init_pointer(builder, 1);
+        builder.set_scale(input.scale);
         Ok(())
     }
 }

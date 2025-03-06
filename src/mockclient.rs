@@ -78,9 +78,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let scale = dsp_scale.set_fft_scale(0xF0F0).await;
             println!("Set Invalid Scale: {:?}", scale);
 
-            println!(
-                "Allocating DDC Channels; Second Allocation will fail if server not restarted ATM"
-            );
             let channela = ddc
                 .allocate_channel(DDCChannelConfig {
                     source_bin: 0,
