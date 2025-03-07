@@ -46,8 +46,8 @@ pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std:
                 "Setting IFBoard Atten: {:#?}",
                 ifboard
                     .set_attens(Attens {
-                        input: 10.3,
-                        output: 11.1
+                        input: 60.,
+                        output: 61.,
                     })
                     .await
             );
