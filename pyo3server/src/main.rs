@@ -1,4 +1,8 @@
-use pyo3::{prelude::*, types::PyDict};
+use numpy::{Complex32, ToPyArray};
+use pyo3::{
+    prelude::*,
+    types::{PyDict, PyNone},
+};
 
 use gen3_rpc::{
     ActualizedDDCChannelConfig, AttenError, Attens, CaptureError, DDCCapabilities, FrequencyError,
@@ -83,7 +87,10 @@ impl IFBoard for IFBoardG2 {
         self.lo = v;
         Python::with_gil(|py| {
             let kwargs = PyDict::new(py);
-            let frac = self.frac_handle.call(py, (*v.numer(), *v.denom() * 1000 * 1000), None).unwrap();
+            let frac = self
+                .frac_handle
+                .call(py, (*v.numer(), *v.denom() * 1000 * 1000), None)
+                .unwrap();
             println!("Here");
             kwargs.set_item("freq", &frac).unwrap();
             let p = self.handle.call_method(py, "set_lo", (), Some(&kwargs));
@@ -110,13 +117,40 @@ impl IFBoard for IFBoardG2 {
     }
 }
 
-struct DACTableMock {
+struct DACTableImpl {
+    dactable: PyObject,
     values: Box<[Complex<i16>; 524288]>,
 }
 
-impl DACTable for DACTableMock {
+impl DACTableImpl {
+    fn new(ol: PyObject) -> Self {
+        let mut di = Python::with_gil(|py| -> DACTableImpl {
+            DACTableImpl {
+                dactable: ol.getattr(py, "dactable").unwrap(),
+                values: Box::new([Complex::i(); 524288]),
+            }
+        });
+        di.set(di.values.clone());
+        di
+    }
+}
+
+impl DACTable for DACTableImpl {
     fn set(&mut self, v: Box<[Complex<i16>; 524288]>) {
         self.values = v;
+        let p = Box::new(
+            self.values
+                .map(|c| Complex32::new(c.re as f32, c.im as f32)),
+        );
+        Python::with_gil(|py| {
+            let pyarr = p.to_pyarray(py);
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("data", pyarr).unwrap();
+            kwargs.set_item("fpgen", PyNone::get(py)).unwrap();
+            self.dactable
+                .call_method(py, "replay", (), Some(&kwargs))
+                .unwrap();
+        });
     }
     fn get(&self) -> Box<[Complex<i16>; 524288]> {
         self.values.clone()
@@ -205,13 +239,58 @@ impl Capture<gen3_rpc::Snap> for CaptureImpl {
 pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     tokio::task::LocalSet::new()
         .run_until(async move {
+            // Start the board, clocks and MTS
+            let ol = Python::with_gil(|py| -> PyObject {
+                // Import MKIDGen3 to register the drivers and start the clocks
+                let mkidgen3 = py.import("mkidgen3").unwrap();
+
+                let kwargs = PyDict::new(py);
+                kwargs
+                    .set_item("programming_key", "4.096GSPS_MTS_direct")
+                    .unwrap();
+                kwargs.set_item("clock_source", "external").unwrap();
+                mkidgen3
+                    .getattr("drivers")
+                    .unwrap()
+                    .getattr("rfdcclock")
+                    .unwrap()
+                    .getattr("configure")
+                    .unwrap()
+                    .call((), Some(&kwargs))
+                    .unwrap();
+
+                let pynq = py.import("pynq").unwrap();
+                let overlay = pynq.getattr("Overlay").unwrap();
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("download", true).unwrap();
+                kwargs.set_item("ignore_version", true).unwrap();
+                kwargs
+                    .set_item("bitfile_name", "/home/xilinx/8tap.bit")
+                    .unwrap();
+                let ol = overlay.call((), Some(&kwargs)).unwrap();
+                mkidgen3
+                    .getattr("quirks")
+                    .unwrap()
+                    .getattr("Overlay")
+                    .unwrap()
+                    .call1((&ol,))
+                    .unwrap()
+                    .call_method0("post_configure")
+                    .unwrap();
+                ol.getattr("rfdc")
+                    .unwrap()
+                    .call_method0("enable_mts")
+                    .unwrap();
+                ol.unbind()
+            });
+
+            // Open a socket
             let listener =
                 tokio::net::TcpListener::bind(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port))
                     .await?;
+
             let board = Gen3Board::new(
-                DACTableMock {
-                    values: Box::new([Complex::i(); 524288]),
-                },
+                DACTableImpl::new(ol),
                 IFBoardG2::new(),
                 DSPScaleMock { fft: 0xfff },
                 ChannelAllocator::<ActualizedDDCChannelConfig, 2048>::new(DDCCapabilities {
