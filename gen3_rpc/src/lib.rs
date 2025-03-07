@@ -4,6 +4,7 @@ pub mod gen3rpc_capnp {
 
 pub mod client;
 pub mod server;
+pub mod utils;
 
 use std::fmt::Display;
 
@@ -151,6 +152,12 @@ pub enum ChannelAllocationError {
     OutOfChannels,
     DestinationInUse,
     ConfigError(ChannelConfigError),
+}
+
+impl From<ChannelConfigError> for ChannelAllocationError {
+    fn from(value: ChannelConfigError) -> Self {
+        Self::ConfigError(value)
+    }
 }
 
 impl<T: Into<capnp::Error>> From<T> for ChannelAllocationError {
@@ -363,6 +370,7 @@ impl SetterInput<gen3rpc_capnp::snap::snap_avg::Owned> for SnapAvg {
     }
 }
 
+#[derive(Copy, Clone)]
 pub enum BinControl {
     FullSwizzle,
     None,
@@ -395,6 +403,17 @@ pub struct ActualizedDDCChannelConfig {
     pub dest_bin: u32,
     pub rotation: i32,
     pub center: Complex<i32>,
+}
+
+impl ActualizedDDCChannelConfig {
+    pub fn erase(self) -> ErasedDDCChannelConfig {
+        ErasedDDCChannelConfig {
+            source_bin: self.source_bin,
+            ddc_freq: self.ddc_freq,
+            rotation: self.rotation,
+            center: self.center,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -481,6 +500,7 @@ impl TryFrom<gen3rpc_capnp::ddc_channel::channel_config::Reader<'_>> for DDCChan
     }
 }
 
+#[derive(Copy, Clone)]
 pub struct DDCCapabilities {
     pub freq_resolution: Rational64,
     pub freq_bits: u16,

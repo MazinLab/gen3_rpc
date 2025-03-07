@@ -16,6 +16,109 @@ use crate::{
     Hertz, Scale16, SnapAvg,
 };
 
+pub struct Gen3Board<
+    TDAC: DACTable,
+    TIFB: IFBoard,
+    TDSP: DSPScale,
+    TDDC: DDC<TCHAN>,
+    TCHAN: DDCChannel,
+    TCAP: Capture<TSNAP>,
+    TSNAP: Snap,
+> {
+    dac_table: DroppableReferenceImpl<TDAC, crate::gen3rpc_capnp::dac_table::Client>,
+    if_board: DroppableReferenceImpl<TIFB, crate::gen3rpc_capnp::if_board::Client>,
+    dsp_scale: DroppableReferenceImpl<TDSP, crate::gen3rpc_capnp::dsp_scale::Client>,
+    ddc: TDDC,
+    capture: TCAP,
+    phantom: PhantomData<(TCHAN, TSNAP)>,
+}
+
+impl<
+        TDAC: DACTable,
+        TIFB: IFBoard,
+        TDSP: DSPScale,
+        TDDC: DDC<TCHAN>,
+        TCHAN: DDCChannel,
+        TCAP: Capture<TSNAP>,
+        TSNAP: Snap,
+    > Gen3Board<TDAC, TIFB, TDSP, TDDC, TCHAN, TCAP, TSNAP>
+{
+    pub fn new(dac_table: TDAC, if_board: TIFB, dsp_scale: TDSP, ddc: TDDC, capture: TCAP) -> Self {
+        Gen3Board {
+            dac_table: DroppableReferenceImpl::new(dac_table),
+            if_board: DroppableReferenceImpl::new(if_board),
+            dsp_scale: DroppableReferenceImpl::new(dsp_scale),
+            ddc,
+            capture,
+            phantom: PhantomData,
+        }
+    }
+}
+impl<
+        TDAC: DACTable,
+        TIFB: IFBoard,
+        TDSP: DSPScale,
+        TDDC: DDC<TCHAN>,
+        TCHAN: DDCChannel,
+        TCAP: Capture<TSNAP>,
+        TSNAP: Snap,
+    > crate::gen3rpc_capnp::gen3_board::Server
+    for Gen3Board<TDAC, TIFB, TDSP, TDDC, TCHAN, TCAP, TSNAP>
+{
+    fn get_ddc(
+        &mut self,
+        _: crate::gen3rpc_capnp::gen3_board::GetDdcParams,
+        mut results: crate::gen3rpc_capnp::gen3_board::GetDdcResults,
+    ) -> Promise<(), capnp::Error> {
+        results
+            .get()
+            .set_ddc(capnp_rpc::new_client(PhantomServer::new(self.ddc.clone())));
+        Promise::ok(())
+    }
+    fn get_dac_table(
+        &mut self,
+        _: crate::gen3rpc_capnp::gen3_board::GetDacTableParams,
+        mut results: crate::gen3rpc_capnp::gen3_board::GetDacTableResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        results
+            .get()
+            .set_dac_table(capnp_rpc::new_client(self.dac_table.try_clone().unwrap()));
+        Promise::ok(())
+    }
+    fn get_capture(
+        &mut self,
+        _: crate::gen3rpc_capnp::gen3_board::GetCaptureParams,
+        mut results: crate::gen3rpc_capnp::gen3_board::GetCaptureResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        results
+            .get()
+            .set_capture(capnp_rpc::new_client(PhantomServer::new(
+                self.capture.clone(),
+            )));
+        Promise::ok(())
+    }
+    fn get_dsp_scale(
+        &mut self,
+        _: crate::gen3rpc_capnp::gen3_board::GetDspScaleParams,
+        mut results: crate::gen3rpc_capnp::gen3_board::GetDspScaleResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        results
+            .get()
+            .set_dsp_scale(capnp_rpc::new_client(self.dsp_scale.try_clone().unwrap()));
+        Promise::ok(())
+    }
+    fn get_if_board(
+        &mut self,
+        _: crate::gen3rpc_capnp::gen3_board::GetIfBoardParams,
+        mut results: crate::gen3rpc_capnp::gen3_board::GetIfBoardResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        results
+            .get()
+            .set_if_board(capnp_rpc::new_client(self.if_board.try_clone().unwrap()));
+        Promise::ok(())
+    }
+}
+
 /// Phantom server is used to implement the DDC Server and the Capture Server
 pub struct PhantomServer<T, D> {
     inner: T,
@@ -90,7 +193,7 @@ pub enum CaptureTapDestBins {
     Phase(Vec<u32>),
 }
 
-pub trait Capture<T: 'static + Send + Snap + Sync> {
+pub trait Capture<T: 'static + Send + Snap + Sync>: Send + Sync + Clone + 'static {
     fn capture(
         &self,
         tap: CaptureTap,
@@ -144,7 +247,7 @@ where
     }
 }
 
-pub trait DDC<T: 'static + Send + DDCChannel + Sync> {
+pub trait DDC<T: 'static + Send + DDCChannel + Sync>: Send + Sync + Clone + 'static {
     fn capabilities(&self) -> DDCCapabilities;
 
     fn allocate_channel(
@@ -245,19 +348,19 @@ where
     }
 }
 
-pub trait DSPScale {
+pub trait DSPScale: Send + Sync + 'static {
     fn set(&mut self, v: u16) -> Result<u16, u16>;
     fn get(&self) -> u16;
 }
 
-pub trait IFBoard {
+pub trait IFBoard: Send + Sync + 'static {
     fn set_lo(&mut self, v: Hertz) -> Result<Hertz, FrequencyError>;
     fn get_lo(&self) -> Hertz;
     fn set_attens(&mut self, a: Attens) -> Result<Attens, AttenError>;
     fn get_attens(&self) -> Attens;
 }
 
-pub trait Snap {
+pub trait Snap: Send + Sync + 'static {
     fn get(&self) -> crate::Snap;
     fn average(&self) -> crate::SnapAvg {
         let b = self.get();
@@ -340,12 +443,13 @@ impl Snap for crate::Snap {
     }
 }
 
-pub trait DACTable {
+pub trait DACTable: Send + Sync + 'static {
     fn set(&mut self, v: Box<[Complex<i16>; 524288]>);
     fn get(&self) -> Box<[Complex<i16>; 524288]>;
 }
 
-pub trait DDCChannel {
+pub trait DDCChannel: Sized + Send + Sync + 'static {
+    fn from_actualized(setup: ActualizedDDCChannelConfig) -> Result<Self, ChannelConfigError>;
     fn get(&self) -> ActualizedDDCChannelConfig;
     fn set(&mut self, replacement: ErasedDDCChannelConfig) -> Result<(), ChannelConfigError>;
 
@@ -361,6 +465,9 @@ pub trait DDCChannel {
 }
 
 impl DDCChannel for ActualizedDDCChannelConfig {
+    fn from_actualized(setup: ActualizedDDCChannelConfig) -> Result<Self, ChannelConfigError> {
+        Ok(setup)
+    }
     fn get(&self) -> ActualizedDDCChannelConfig {
         self.clone()
     }
@@ -665,6 +772,14 @@ impl<T: Send + Sync, C> Drop for DroppableReferenceImpl<T, C> {
 }
 
 impl<T: Send + Sync, C> DroppableReferenceImpl<T, C> {
+    fn new(val: T) -> Self {
+        DroppableReferenceImpl {
+            state: Arc::new(RwLock::new(DRState::Unshared)),
+            inner: Arc::new(RwLock::new(val)),
+            stale: false,
+            phantom: PhantomData,
+        }
+    }
     fn lock_mut(&self) -> Result<RwLockWriteGuard<'_, T>, capnp::Error> {
         let ls = self.state.read().unwrap();
         match *ls {

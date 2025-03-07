@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["gen3_rpc", "mock"]
+members = ["gen3_rpc", "mock", "pyo3server"]
