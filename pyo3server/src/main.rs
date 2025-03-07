@@ -120,6 +120,7 @@ impl IFBoard for IFBoardG2 {
 struct DACTableImpl {
     dactable: PyObject,
     values: Box<[Complex<i16>; 524288]>,
+    values_f32: Box<[Complex32; 524288]>,
 }
 
 impl DACTableImpl {
@@ -128,6 +129,7 @@ impl DACTableImpl {
             DACTableImpl {
                 dactable: ol.getattr(py, "dactable").unwrap(),
                 values: Box::new([Complex::i(); 524288]),
+                values_f32: Box::new([Complex::i(); 524288]),
             }
         });
         di.set(di.values.clone());
@@ -138,12 +140,12 @@ impl DACTableImpl {
 impl DACTable for DACTableImpl {
     fn set(&mut self, v: Box<[Complex<i16>; 524288]>) {
         self.values = v;
-        let p = Box::new(
-            self.values
-                .map(|c| Complex32::new(c.re as f32, c.im as f32)),
-        );
+        // Can't map cause we need to keep this off the stack
+        for (i, v) in self.values.iter().enumerate() {
+            self.values_f32[i] = Complex::new(v.re as f32, v.im as f32);
+        }
         Python::with_gil(|py| {
-            let pyarr = p.to_pyarray(py);
+            let pyarr = self.values_f32.to_pyarray(py);
             let kwargs = PyDict::new(py);
             kwargs.set_item("data", pyarr).unwrap();
             kwargs.set_item("fpgen", PyNone::get(py)).unwrap();
