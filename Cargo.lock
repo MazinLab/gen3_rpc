@@ -557,8 +557,16 @@ dependencies = [
 name = "pyo3server"
 version = "0.1.0"
 dependencies = [
+ "capnp",
+ "capnp-rpc",
+ "futures",
+ "futures-io",
  "gen3_rpc",
+ "num",
+ "num-complex",
  "pyo3",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

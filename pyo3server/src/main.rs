@@ -40,7 +40,7 @@ impl DSPScale for DSPScaleMock {
 
 struct IFBoardG2 {
     handle: PyObject,
-    lo_handle: PyObject,
+    frac_handle: PyObject,
     lo: Hertz,
     attens: Attens,
 }
@@ -48,7 +48,7 @@ struct IFBoardG2 {
 impl IFBoardG2 {
     fn new() -> IFBoardG2 {
         let mut handle: Option<PyObject> = None;
-        let mut lo_handle: Option<PyObject> = None;
+        let mut frac_handle: Option<PyObject> = None;
         Python::with_gil(|py| {
             let ifb = py.import("mkidgen3.drivers.ifboard").unwrap();
             let ifb = ifb.getattr("IFBoard").unwrap().call0().unwrap();
@@ -56,12 +56,12 @@ impl IFBoardG2 {
             handle = Some(ifb.unbind());
 
             let fracs = py.import("fractions").unwrap();
-            let frac = fracs.getattr("Fraction").unwrap().call0().unwrap();
-            lo_handle = Some(frac.unbind());
+            let frac = fracs.getattr("Fraction").unwrap();
+            frac_handle = Some(frac.unbind());
         });
         let mut ifb = IFBoardG2 {
             handle: handle.unwrap(),
-            lo_handle: lo_handle.unwrap(),
+            frac_handle: frac_handle.unwrap(),
             lo: Hertz::new(0, 1),
             attens: Attens {
                 input: 60.,
@@ -83,13 +83,11 @@ impl IFBoard for IFBoardG2 {
         self.lo = v;
         Python::with_gil(|py| {
             let kwargs = PyDict::new(py);
-            self.lo_handle.setattr(py, "numerator", *v.numer()).unwrap();
-            self.lo_handle
-                .setattr(py, "denominator", *v.denom())
-                .unwrap();
-            kwargs.set_item("freq", &self.lo_handle).unwrap();
+            let frac = self.frac_handle.call(py, (*v.numer(), *v.denom() * 1000 * 1000), None).unwrap();
+            println!("Here");
+            kwargs.set_item("freq", &frac).unwrap();
             let p = self.handle.call_method(py, "set_lo", (), Some(&kwargs));
-            assert!(p.is_ok());
+            p.unwrap();
         });
         Ok(v)
     }
