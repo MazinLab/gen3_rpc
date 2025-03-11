@@ -138,11 +138,10 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
             let snap = match db {
                 CaptureTapDestBins::RawIQ => {
                     let cap = capture.lock().unwrap();
-                    Python::with_gil(|py| -> gen3_rpc::Snap {
+                    Python::with_gil(|py| -> Result<gen3_rpc::Snap, PyErr> {
                         let npar = py.import("numpy").unwrap().getattr("array").unwrap();
-                        let snap = cap
-                            .call_method(py, "capture_adc", (length, false, false, true), None)
-                            .unwrap();
+                        let snap =
+                            cap.call_method(py, "capture_adc", (length, false, false, true), None)?;
                         let snaparr: PyArrayLike2<i16> =
                             npar.call1((&snap,)).unwrap().extract().unwrap();
                         let s = gen3_rpc::Snap::Raw(
@@ -156,16 +155,14 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                                 .collect(),
                         );
                         snap.call_method0(py, "freebuffer").unwrap();
-                        s
+                        Ok(s)
                     })
                 }
                 CaptureTapDestBins::DdcIQ(d) => {
                     let cap = capture.lock().unwrap();
-                    Python::with_gil(|py| -> gen3_rpc::Snap {
+                    Python::with_gil(|py| -> Result<gen3_rpc::Snap, PyErr> {
                         let npar = py.import("numpy").unwrap().getattr("array").unwrap();
-                        let snap = cap
-                            .call_method(py, "capture", (length, "ddciq"), None)
-                            .unwrap();
+                        let snap = cap.call_method(py, "capture", (length, "ddciq"), None)?;
                         let snaparr: PyArrayLike3<i16> =
                             npar.call1((&snap,)).unwrap().extract().unwrap();
                         let s = gen3_rpc::Snap::DdcIQ(
@@ -183,16 +180,14 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                                 .collect(),
                         );
                         snap.call_method0(py, "freebuffer").unwrap();
-                        s
+                        Ok(s)
                     })
                 }
                 CaptureTapDestBins::Phase(p) => {
                     let cap = capture.lock().unwrap();
-                    Python::with_gil(|py| -> gen3_rpc::Snap {
+                    Python::with_gil(|py| -> Result<gen3_rpc::Snap, PyErr> {
                         let npar = py.import("numpy").unwrap().getattr("array").unwrap();
-                        let snap = cap
-                            .call_method(py, "capture", (length, "filtphase"), None)
-                            .unwrap();
+                        let snap = cap.call_method(py, "capture", (length, "filtphase"), None)?;
                         let snaparr: PyArrayLike2<i16> =
                             npar.call1((&snap,)).unwrap().extract().unwrap();
                         let s = gen3_rpc::Snap::Phase(
@@ -205,10 +200,11 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                                 .collect(),
                         );
                         snap.call_method0(py, "freebuffer").unwrap();
-                        s
+                        Ok(s)
                     })
                 }
             };
+            let snap = snap.map_err(|_| CaptureError::MemoryUnavailable)?;
             Ok(DroppableReferenceImpl {
                 state: Arc::new(RwLock::new(DRState::Exclusive)),
                 inner: Arc::new(RwLock::new(snap)),
