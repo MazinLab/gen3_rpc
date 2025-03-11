@@ -18,13 +18,13 @@ use gen3_rpc::server::*;
 use std::{
     marker::PhantomData,
     net::{Ipv4Addr, SocketAddrV4},
-    ops::{Shl, Shr},
+    ops::Shl,
     sync::{Arc, Mutex, RwLock},
 };
 
 use capnp::capability::Promise;
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
-use futures::{AsyncReadExt, FutureExt, TryFutureExt};
+use futures::{AsyncReadExt, TryFutureExt};
 
 pub struct MMIO {
     mmio: PyObject,
@@ -49,8 +49,9 @@ impl MMIO {
         });
     }
 
-    //SAFETY: must use with a valid pynq-mappable address range
-    //        in which no reads or writes could cause a bus error
+    /// # Safety
+    /// Address and range must correspond to a pynq mappable range,
+    /// in which no reads or writes could cause a bus fault
     pub unsafe fn new(address: usize, range: usize) -> MMIO {
         Python::with_gil(|py| -> MMIO {
             MMIO {
@@ -221,7 +222,9 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
         tap: CaptureTap,
         length: u64,
     ) -> Promise<Result<SnapAvg, CaptureError>, capnp::Error> {
-        todo!()
+        let dr = self.capture(tap, length);
+        let avg = dr.map_ok(|res| res.map(|dr| dr.inner.read().unwrap().average()));
+        Promise::from_future(avg)
     }
 }
 
@@ -438,85 +441,6 @@ impl DACTable for DACTableImpl {
     }
     fn get(&self) -> Box<[Complex<i16>; 524288]> {
         self.values.clone()
-    }
-}
-
-#[derive(Clone)]
-struct CaptureImpl;
-
-impl Capture<gen3_rpc::Snap> for CaptureImpl {
-    fn capture(
-        &self,
-        tap: CaptureTap,
-        length: u64,
-    ) -> Promise<
-        Result<
-            DroppableReferenceImpl<gen3_rpc::Snap, gen3_rpc::gen3rpc_capnp::snap::Client>,
-            CaptureError,
-        >,
-        capnp::Error,
-    > {
-        let dbp = tap.dest_bins();
-        let dbp = dbp.map_ok(move |dbs| {
-            Ok(match dbs {
-                CaptureTapDestBins::RawIQ => gen3_rpc::Snap::Raw(
-                    (0..length)
-                        .map(|i| Complex::new((i & 0x7fff) as i16, (i.shr(16) & 0x7fffu64) as i16))
-                        .collect(),
-                ),
-                CaptureTapDestBins::DdcIQ(dbs) => gen3_rpc::Snap::DdcIQ(
-                    dbs.into_iter()
-                        .map(|db| {
-                            (0..length)
-                                .map(|i| {
-                                    Complex::new(
-                                        (db as i16) ^ (i & 0x7fff) as i16,
-                                        (db as i16) ^ (i.shr(16) & 0x7fffu64) as i16,
-                                    )
-                                })
-                                .collect()
-                        })
-                        .collect(),
-                ),
-                CaptureTapDestBins::Phase(dbs) => gen3_rpc::Snap::Phase(
-                    dbs.into_iter()
-                        .map(|db| {
-                            (0..length)
-                                .map(|i| (db as i16) ^ (i & 0x7fff) as i16)
-                                .collect()
-                        })
-                        .collect(),
-                ),
-            })
-            .map(|d| DroppableReferenceImpl {
-                state: Arc::new(RwLock::new(DRState::Exclusive)),
-                inner: Arc::new(RwLock::new(d)),
-                stale: false,
-                phantom: PhantomData,
-            })
-        });
-        Promise::from_future(dbp)
-    }
-    fn average(
-        &self,
-        tap: CaptureTap,
-        _length: u64,
-    ) -> Promise<Result<gen3_rpc::SnapAvg, CaptureError>, capnp::Error> {
-        let taps = tap.dest_bins();
-        let res = taps.map_ok(move |dbs| {
-            Ok(match dbs {
-                CaptureTapDestBins::RawIQ => SnapAvg::Raw(Complex::new(0.0, 0.0)),
-                CaptureTapDestBins::DdcIQ(dbs) => SnapAvg::DdcIQ(
-                    dbs.into_iter()
-                        .map(|a| Complex::new(a as f64, a as f64))
-                        .collect(),
-                ),
-                CaptureTapDestBins::Phase(dbs) => {
-                    SnapAvg::Phase(dbs.into_iter().map(|a| a as f64).collect())
-                }
-            })
-        });
-        Promise::from_future(res)
     }
 }
 
