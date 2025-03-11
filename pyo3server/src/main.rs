@@ -295,6 +295,8 @@ impl DSPScaleImpl {
                     .unwrap()
                     .getattr(py, "opfb")
                     .unwrap()
+                    .getattr(py, "fft")
+                    .unwrap()
                     .getattr(py, "axi_gpio_0")
                     .unwrap()
                     .getattr(py, "channel0")
