@@ -168,13 +168,16 @@ pub async fn mockserver(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                     },
                 },
                 DSPScaleMock { fft: 0xfff },
-                ChannelAllocator::<ActualizedDDCChannelConfig, 2048>::new(DDCCapabilities {
-                    freq_resolution: Hertz::new(1, 1),
-                    freq_bits: 25,
-                    rotation_bits: 16,
-                    center_bits: 16,
-                    bin_control: gen3_rpc::BinControl::FullSwizzle,
-                }),
+                ChannelAllocator::<(ActualizedDDCChannelConfig, DDCCapabilities), 2048>::new(
+                    DDCCapabilities {
+                        freq_resolution: Hertz::new(1, 1),
+                        freq_bits: 25,
+                        rotation_bits: 16,
+                        center_bits: 16,
+                        bin_control: gen3_rpc::BinControl::FullSwizzle,
+                    },
+                    (),
+                ),
                 CaptureImpl,
             );
             let client: gen3rpc_capnp::gen3_board::Client = capnp_rpc::new_client(board);

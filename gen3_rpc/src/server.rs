@@ -11,9 +11,9 @@ use futures::{future::try_join_all, FutureExt, TryFutureExt};
 use num_complex::{Complex, Complex64};
 
 use crate::{
-    ActualizedDDCChannelConfig, AttenError, Attens, CaptureError, ChannelAllocationError,
-    ChannelConfigError, DDCCapabilities, DDCChannelConfig, ErasedDDCChannelConfig, FrequencyError,
-    Hertz, Scale16, SnapAvg,
+    utils::little_fixed::LittleFixedDynI32, ActualizedDDCChannelConfig, AttenError, Attens,
+    CaptureError, ChannelAllocationError, ChannelConfigError, DDCCapabilities, DDCChannelConfig,
+    ErasedDDCChannelConfig, FrequencyError, Hertz, Scale16, SnapAvg,
 };
 
 pub struct Gen3Board<
@@ -449,7 +449,13 @@ pub trait DACTable: Send + Sync + 'static {
 }
 
 pub trait DDCChannel: Sized + Send + Sync + 'static {
-    fn from_actualized(setup: ActualizedDDCChannelConfig) -> Result<Self, ChannelConfigError>;
+    type Shared: Clone + Send + Sync + Sized + 'static;
+
+    fn from_actualized(
+        setup: ActualizedDDCChannelConfig,
+        caps: DDCCapabilities,
+        shared: Self::Shared,
+    ) -> Result<Self, ChannelConfigError>;
     fn get(&self) -> ActualizedDDCChannelConfig;
     fn set(&mut self, replacement: ErasedDDCChannelConfig) -> Result<(), ChannelConfigError>;
 
@@ -464,38 +470,64 @@ pub trait DDCChannel: Sized + Send + Sync + 'static {
     }
 }
 
-impl DDCChannel for ActualizedDDCChannelConfig {
-    fn from_actualized(setup: ActualizedDDCChannelConfig) -> Result<Self, ChannelConfigError> {
-        Ok(setup)
+impl DDCChannel for (ActualizedDDCChannelConfig, DDCCapabilities) {
+    type Shared = ();
+
+    fn from_actualized(
+        setup: ActualizedDDCChannelConfig,
+        caps: DDCCapabilities,
+        _shared: Self::Shared,
+    ) -> Result<Self, ChannelConfigError> {
+        Ok((setup, caps))
     }
     fn get(&self) -> ActualizedDDCChannelConfig {
-        self.clone()
+        self.0.clone()
     }
     fn set(&mut self, replacement: ErasedDDCChannelConfig) -> Result<(), ChannelConfigError> {
-        self.source_bin = replacement.source_bin;
-        self.ddc_freq = replacement.ddc_freq;
-        self.rotation = replacement.rotation;
-        self.center = replacement.center;
+        self.0.source_bin = replacement.source_bin;
+        let ddc_freq = LittleFixedDynI32::try_new(replacement.ddc_freq, self.1.freq_bits as usize)
+            .ok_or(ChannelConfigError::UsedTooManyBits)?;
+        let rotation =
+            LittleFixedDynI32::try_new(replacement.rotation, self.1.rotation_bits as usize)
+                .ok_or(ChannelConfigError::UsedTooManyBits)?;
+        let center_re =
+            LittleFixedDynI32::try_new(replacement.center.re, self.1.center_bits as usize)
+                .ok_or(ChannelConfigError::UsedTooManyBits)?;
+        let center_im =
+            LittleFixedDynI32::try_new(replacement.center.im, self.1.center_bits as usize)
+                .ok_or(ChannelConfigError::UsedTooManyBits)?;
+        self.0.source_bin = replacement.source_bin;
+        self.0.ddc_freq = *ddc_freq;
+        self.0.rotation = *rotation;
+        self.0.center = Complex::new(*center_re, *center_im);
         Ok(())
     }
     fn set_source(&mut self, source_bin: u32) -> Result<(), ChannelConfigError> {
-        self.source_bin = source_bin;
+        self.0.source_bin = source_bin;
         Ok(())
     }
     fn set_ddc_freq(&mut self, ddc_freq: i32) -> Result<(), ChannelConfigError> {
-        self.ddc_freq = ddc_freq;
+        let ddc_freq = LittleFixedDynI32::try_new(ddc_freq, self.1.freq_bits as usize)
+            .ok_or(ChannelConfigError::UsedTooManyBits)?;
+        self.0.ddc_freq = *ddc_freq;
         Ok(())
     }
     fn set_rotation(&mut self, rotation: i32) -> Result<(), ChannelConfigError> {
-        self.rotation = rotation;
+        let rotation = LittleFixedDynI32::try_new(rotation, self.1.rotation_bits as usize)
+            .ok_or(ChannelConfigError::UsedTooManyBits)?;
+        self.0.rotation = *rotation;
         Ok(())
     }
     fn set_center(&mut self, center: Complex<i32>) -> Result<(), ChannelConfigError> {
-        self.center = center;
+        let center_re = LittleFixedDynI32::try_new(center.re, self.1.center_bits as usize)
+            .ok_or(ChannelConfigError::UsedTooManyBits)?;
+        let center_im = LittleFixedDynI32::try_new(center.im, self.1.center_bits as usize)
+            .ok_or(ChannelConfigError::UsedTooManyBits)?;
+        self.0.center = Complex::new(*center_re, *center_im);
         Ok(())
     }
     fn get_baseband_freq(&self) -> Hertz {
-        Hertz::new(self.ddc_freq as i64, i32::MAX as i64)
+        Hertz::new(self.0.ddc_freq as i64, i32::MAX as i64)
     }
 }
 

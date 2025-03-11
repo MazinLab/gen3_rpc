@@ -1,3 +1,162 @@
+pub mod little_fixed {
+    use std::ops::Deref;
+    macro_rules! little_fixedi {
+        ($name:ident, $dname:ident, $inner_type:ty) => {
+            pub struct $dname {
+                inner: $inner_type,
+                bits: usize,
+            }
+
+            impl $dname {
+                pub fn min(&self) -> $inner_type {
+                    -(1 << (self.bits - 1))
+                }
+
+                pub fn max(&self) -> $inner_type {
+                    (1 << (self.bits - 1)) - 1
+                }
+
+                pub fn mask(&self) -> $inner_type {
+                    self.inner & ((1 << self.bits) - 1)
+                }
+
+                pub fn try_new(value: $inner_type, bits: usize) -> Option<Self> {
+                    let n = $dname { inner: value, bits };
+                    if value >= n.min() && value <= n.max() {
+                        Some(n)
+                    } else {
+                        None
+                    }
+                }
+            }
+
+            impl Deref for $dname {
+                type Target = $inner_type;
+
+                fn deref(&self) -> &Self::Target {
+                    &self.inner
+                }
+            }
+
+            pub struct $name<const BITS: usize> {
+                inner: $inner_type,
+            }
+
+            impl<const BITS: usize> $name<BITS> {
+                const TS_MIN: $inner_type = -(1 << (BITS - 1));
+                const TS_MAX: $inner_type = (1 << (BITS - 1)) - 1;
+
+                pub fn mask(&self) -> $inner_type {
+                    self.inner & ((1 << BITS) - 1)
+                }
+            }
+
+            impl<const BITS: usize> Deref for $name<BITS> {
+                type Target = $inner_type;
+
+                fn deref(&self) -> &Self::Target {
+                    &self.inner
+                }
+            }
+
+            impl<const BITS: usize> TryFrom<$inner_type> for $name<BITS> {
+                type Error = ();
+
+                fn try_from(value: $inner_type) -> Result<Self, Self::Error> {
+                    if value >= Self::TS_MIN && value <= Self::TS_MAX {
+                        Ok($name { inner: value })
+                    } else {
+                        Err(())
+                    }
+                }
+            }
+        };
+    }
+    macro_rules! little_fixedu {
+        ($name:ident, $dname:ident, $inner_type:ty) => {
+            pub struct $dname {
+                inner: $inner_type,
+                bits: usize,
+            }
+
+            impl $dname {
+                pub fn min(&self) -> $inner_type {
+                    0
+                }
+
+                pub fn max(&self) -> $inner_type {
+                    (1 << (self.bits)) - 1
+                }
+
+                pub fn mask(&self) -> $inner_type {
+                    self.inner & ((1 << self.bits) - 1)
+                }
+
+                pub fn try_new(value: $inner_type, bits: usize) -> Option<Self> {
+                    let n = $dname { inner: value, bits };
+                    if value >= n.min() && value <= n.max() {
+                        Some(n)
+                    } else {
+                        None
+                    }
+                }
+            }
+
+            impl Deref for $dname {
+                type Target = $inner_type;
+
+                fn deref(&self) -> &Self::Target {
+                    &self.inner
+                }
+            }
+
+            pub struct $name<const BITS: usize> {
+                inner: $inner_type,
+            }
+
+            impl<const BITS: usize> $name<BITS> {
+                const TS_MIN: $inner_type = 0;
+                const TS_MAX: $inner_type = (1 << (BITS)) - 1;
+
+                pub fn mask(&self) -> $inner_type {
+                    self.inner & ((1 << BITS) - 1)
+                }
+            }
+
+            impl<const BITS: usize> Deref for $name<BITS> {
+                type Target = $inner_type;
+
+                fn deref(&self) -> &Self::Target {
+                    &self.inner
+                }
+            }
+
+            impl<const BITS: usize> TryFrom<$inner_type> for $name<BITS> {
+                type Error = ();
+
+                fn try_from(value: $inner_type) -> Result<Self, Self::Error> {
+                    if value >= Self::TS_MIN && value <= Self::TS_MAX {
+                        Ok($name { inner: value })
+                    } else {
+                        Err(())
+                    }
+                }
+            }
+        };
+    }
+
+    little_fixedi!(LittleFixedI8, LittleFixedDynI8, i8);
+    little_fixedu!(LittleFixedU8, LittleFixedDynU8, u8);
+    little_fixedi!(LittleFixedI16, LittleFixedDynI16, i16);
+    little_fixedu!(LittleFixedU16, LittleFixedDynU16, u16);
+    little_fixedi!(LittleFixedI32, LittleFixedDynI32, i32);
+    little_fixedu!(LittleFixedU32, LittleFixedDynU32, u32);
+    little_fixedi!(LittleFixedI64, LittleFixedDynI64, i64);
+    little_fixedu!(LittleFixedU64, LittleFixedDynU64, u64);
+    little_fixedi!(LittleFixedI128, LittleFixedDynI128, i128);
+    little_fixedu!(LittleFixedU128, LittleFixedDynU128, u128);
+}
+
 pub mod client {}
 
 pub mod server {
@@ -18,13 +177,15 @@ pub mod server {
         capabilites: DDCCapabilities,
         channels:
             Arc<Mutex<HashMap<u32, DroppableReferenceImpl<T, gen3rpc_capnp::ddc_channel::Client>>>>,
+        shared: T::Shared,
     }
 
     impl<T: DDCChannel + Send + Sync + 'static, const C: u32> ChannelAllocator<T, C> {
-        pub fn new(caps: DDCCapabilities) -> Self {
+        pub fn new(caps: DDCCapabilities, shared: T::Shared) -> Self {
             ChannelAllocator {
                 capabilites: caps,
                 channels: Arc::new(Mutex::new(HashMap::new())),
+                shared,
             }
         }
 
@@ -91,7 +252,11 @@ pub mod server {
                             }
                             let dr = DroppableReferenceImpl {
                                 state: Arc::new(RwLock::new(DRState::Shared(1))),
-                                inner: Arc::new(RwLock::new(T::from_actualized(actualized)?)),
+                                inner: Arc::new(RwLock::new(T::from_actualized(
+                                    actualized,
+                                    self.capabilites,
+                                    self.shared.clone(),
+                                )?)),
                                 stale: false,
                                 phantom: PhantomData,
                             };
@@ -138,6 +303,8 @@ pub mod server {
                                 state: Arc::new(RwLock::new(DRState::Shared(1))),
                                 inner: Arc::new(RwLock::new(T::from_actualized(
                                     erased.with_dest(i),
+                                    self.capabilites,
+                                    self.shared.clone(),
                                 )?)),
                                 stale: false,
                                 phantom: PhantomData,
