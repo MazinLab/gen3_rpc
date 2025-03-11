@@ -46,8 +46,8 @@ pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std:
                 "Setting IFBoard Atten: {:#?}",
                 ifboard
                     .set_attens(Attens {
-                        input: 10.3,
-                        output: 11.1
+                        input: 60.,
+                        output: 61.,
                     })
                     .await
             );
@@ -129,7 +129,7 @@ pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std:
             println!("Phase Snap: {:#?}", phase);
 
             let ddciq = capture
-                .capture(CaptureTap::new(&rfchain, Tap::Phase(&channels)), 16)
+                .capture(CaptureTap::new(&rfchain, Tap::DDCIQ(&channels)), 16)
                 .await
                 .unwrap();
             println!("DDC Snap: {:#?}", ddciq);
