@@ -163,7 +163,7 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                     Python::with_gil(|py| -> gen3_rpc::Snap {
                         let npar = py.import("numpy").unwrap().getattr("array").unwrap();
                         let snap = cap
-                            .call_method(py, "capture", (length, "ddc"), None)
+                            .call_method(py, "capture", (length, "ddciq"), None)
                             .unwrap();
                         let snaparr: PyArrayLike3<i16> =
                             npar.call1((&snap,)).unwrap().extract().unwrap();
@@ -190,7 +190,7 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                     Python::with_gil(|py| -> gen3_rpc::Snap {
                         let npar = py.import("numpy").unwrap().getattr("array").unwrap();
                         let snap = cap
-                            .call_method(py, "capture", (length, "ddc"), None)
+                            .call_method(py, "capture", (length, "filtphase"), None)
                             .unwrap();
                         let snaparr: PyArrayLike2<i16> =
                             npar.call1((&snap,)).unwrap().extract().unwrap();
