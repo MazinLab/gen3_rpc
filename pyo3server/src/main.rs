@@ -299,7 +299,7 @@ impl DSPScaleImpl {
                     .unwrap()
                     .getattr(py, "axi_gpio_0")
                     .unwrap()
-                    .getattr(py, "channel0")
+                    .getattr(py, "channel1")
                     .unwrap(),
             }
         });
