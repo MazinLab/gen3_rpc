@@ -180,8 +180,8 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                                     (0..length as usize)
                                         .map(|i| {
                                             Complex::new(
-                                                *snaparr.get(Ix3(d as usize, i, 0)).unwrap(),
-                                                *snaparr.get(Ix3(d as usize, i, 1)).unwrap(),
+                                                *snaparr.get(Ix3(i, d as usize, 0)).unwrap(),
+                                                *snaparr.get(Ix3(i, d as usize, 1)).unwrap(),
                                             )
                                         })
                                         .collect()
@@ -206,7 +206,7 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                             p.into_iter()
                                 .map(|d| {
                                     (0..length as usize)
-                                        .map(|i| *snaparr.get(Ix2(d as usize, i)).unwrap())
+                                        .map(|i| *snaparr.get(Ix2(i, d as usize)).unwrap())
                                         .collect()
                                 })
                                 .collect(),
