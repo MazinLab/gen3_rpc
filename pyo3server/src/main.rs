@@ -1,3 +1,4 @@
+use env_logger::Env;
 use log::{debug, error, info};
 
 use numpy::{Complex32, Ix2, Ix3, PyArrayLike2, PyArrayLike3, ToPyArray};
@@ -588,7 +589,7 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     pyo3::prepare_freethreaded_python();
     let rt = Runtime::new()?;
     rt.block_on(async { pyo3server(4242).await })
