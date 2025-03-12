@@ -12,6 +12,6 @@ gen3_rpc = { version = "0.1.0", path = "../gen3_rpc" }
 num = "0.4.3"
 num-complex = "0.4.6"
 numpy = "0.23.0"
-pyo3 = { version = "0.23.5", features = ["auto-initialize"] }
-tokio = { version = "1.43.0", features = ["macros", "net", "rt", "tokio-macros"] }
+pyo3 = { version = "0.23.5" }
+tokio = { version = "1.43.0", features = ["macros", "full", "net", "rt", "tokio-macros"] }
 tokio-util = { version = "0.7.13", features = ["net", "compat"] }

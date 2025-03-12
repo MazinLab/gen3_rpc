@@ -14,6 +14,7 @@ use gen3_rpc::{
 use num::Complex;
 
 use gen3_rpc::server::*;
+use tokio::runtime::Runtime;
 
 use std::{
     marker::PhantomData,
@@ -551,8 +552,8 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         .await
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     pyo3::prepare_freethreaded_python();
-    pyo3server(4242).await
+    let rt = Runtime::new()?;
+    rt.block_on(async { pyo3server(4242).await })
 }
