@@ -1,5 +1,5 @@
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
-use futures::AsyncReadExt;
+use futures::{AsyncReadExt, future::try_join_all};
 use gen3_rpc::{
     Attens, DDCChannelConfig, Hertz,
     client::{self, CaptureTap, RFChain, Tap},
@@ -133,6 +133,11 @@ pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std:
                 .await
                 .unwrap();
             println!("DDC Snap: {:#?}", ddciq);
+
+            let chans_256 = try_join_all((0..16).map(|_i| ddc.allocate_channel(DDCChannelConfig { source_bin: 0, ddc_freq: 0, dest_bin: None, rotation: 0, center:  Complex::new(0, 0)}))).await.unwrap();
+
+            let sweep_freqs = (-1..1).map(|i| Hertz::new(6_000_000_000 + i * 8192, 1)).collect();
+            println!("{:#?}", capture.sweep(Tap::DDCIQ(&chans_256.iter().collect::<Vec<_>>()), &dactable, &ifboard, &dsp_scale, 1024, sweep_freqs).await);
 
             Ok(())
         })
