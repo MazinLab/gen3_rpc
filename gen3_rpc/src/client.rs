@@ -17,6 +17,7 @@ use super::gen3rpc_capnp::option::option::Which as OWhich;
 use super::gen3rpc_capnp::rational::Reader as RatReader;
 use super::gen3rpc_capnp::result::result::Which as RWhich;
 use super::gen3rpc_capnp::snap::snap::Which as SWhich;
+use super::gen3rpc_capnp::snap::snap_avg::Which as SAWhich;
 
 use capnp::{
     capability::FromClientHook,
@@ -137,7 +138,7 @@ impl<'a> From<C32Reader<'a>> for Complex<i32> {
 }
 
 pub struct ClientState<T: FromClientHook + HasTypeId, S> {
-    client: T,
+    pub(crate) client: T,
     state: S,
 }
 
@@ -411,6 +412,89 @@ impl DDC {
 }
 
 impl Capture {
+    pub async fn sweep(
+        &self,
+        tap: Tap<'_>,
+        dac_table: &DACTable,
+        if_board: &IFBoard,
+        dsp_scale: &DSPScale,
+        length: usize,
+        freqs: Vec<Hertz>,
+    ) -> Vec<SnapAvg> {
+        let mut results: Vec<SnapAvg> = Vec::with_capacity(length);
+        for freq in freqs.into_iter() {
+            let mut request = if_board.client.set_freq_request();
+            let mut nd = request.get().init_freq().init_frequency();
+            nd.set_numerator(*freq.numer());
+            nd.set_denominator(*freq.denom());
+            request.send().promise.await.unwrap();
+
+            let mut request = self.client.average_request();
+            let mut rtap = request.get().init_tap();
+            let mut rfchain = rtap.reborrow().init_rf_chain();
+            rfchain.set_dac_table(dac_table.client.clone());
+            rfchain.set_if_board(if_board.client.clone());
+            rfchain.set_dsp_scale(dsp_scale.client.clone());
+
+            match tap {
+                Tap::RawIQ => {
+                    rtap.set_raw_iq(());
+                }
+                Tap::DDCIQ(ddcs) => {
+                    let mut taps = rtap.init_ddc_iq(ddcs.len() as u32);
+                    for (i, ddc) in ddcs.iter().enumerate() {
+                        taps.set(i as u32, ddc.client.client.clone().into_client_hook())
+                    }
+                }
+                Tap::Phase(ddcs) => {
+                    let mut taps = rtap.init_phase(ddcs.len() as u32);
+                    for (i, ddc) in ddcs.iter().enumerate() {
+                        taps.set(i as u32, ddc.client.client.clone().into_client_hook())
+                    }
+                }
+            }
+            request.get().set_length(length as u64);
+            let response = request.send().promise.await.unwrap();
+            let avg = response
+                .get()
+                .unwrap()
+                .get_result()
+                .unwrap()
+                .get_request()
+                .send()
+                .promise
+                .await
+                .unwrap();
+            let res: Result<_, _> = avg
+                .get()
+                .unwrap()
+                .get_result()
+                .unwrap()
+                .which()
+                .unwrap()
+                .into();
+            let res = res.unwrap().unwrap();
+            match res.which().unwrap() {
+                SAWhich::RawIq(r) => {
+                    let r = r.unwrap();
+                    results.push(SnapAvg::Raw(Complex::new(r.get_real(), r.get_imag())));
+                }
+                SAWhich::DdcIq(d) => {
+                    let d = d.unwrap();
+                    results.push(SnapAvg::DdcIQ(
+                        d.into_iter()
+                            .map(|d| Complex::new(d.get_real(), d.get_imag()))
+                            .collect(),
+                    ));
+                }
+                SAWhich::Phase(p) => {
+                    let p = p.unwrap();
+                    results.push(SnapAvg::Phase(p.into_iter().collect()));
+                }
+            }
+        }
+        results
+    }
     pub async fn capture(&self, tap: CaptureTap<'_>, length: u64) -> Result<Snap, CaptureError> {
         let mut request = self.client.capture_request();
         let mut rtap = request.get().init_tap();

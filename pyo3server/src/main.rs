@@ -165,6 +165,7 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                 }
                 CaptureTapDestBins::DdcIQ(d) => {
                     info!("Capturing {} DDC IQ samples from {} taps", length, d.len());
+                    debug!("Capturing from {:?}", d);
                     let cap = capture.lock().unwrap();
                     Python::with_gil(|py| -> Result<gen3_rpc::Snap, PyErr> {
                         let npar = py.import("numpy").unwrap().getattr("array").unwrap();
@@ -191,6 +192,7 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                 }
                 CaptureTapDestBins::Phase(p) => {
                     info!("Capturing {} phase samples from {} taps", length, p.len());
+                    debug!("Capturing from {:?}", p);
                     let cap = capture.lock().unwrap();
                     Python::with_gil(|py| -> Result<gen3_rpc::Snap, PyErr> {
                         let npar = py.import("numpy").unwrap().getattr("array").unwrap();
