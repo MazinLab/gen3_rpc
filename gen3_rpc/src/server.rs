@@ -950,7 +950,6 @@ macro_rules! droppable_reference {
                 _: crate::gen3rpc_capnp::droppable_reference::TryIntoMutParams,
                 mut response: crate::gen3rpc_capnp::droppable_reference::TryIntoMutResults,
             ) -> capnp::capability::Promise<(), capnp::Error> {
-                println!("Attpmption to turn something into a mutable ref");
                 let mut i = self.state.write().unwrap();
                 let resimp = match *i {
                     DRState::Unshared => unreachable!(),
@@ -1263,7 +1262,6 @@ impl<T: DACTable + Send + Sync> crate::gen3rpc_capnp::dac_table::Server
     ) -> capnp::capability::Promise<(), capnp::Error> {
         pry!(self.check_exc());
         let replace = pry!(pry!(pry!(params.get()).get_replace()).get_data());
-        println!("Setting DacTable");
 
         let mut values = Box::new([Complex::new(0, 0); 524288]);
         assert_eq!(values.len(), replace.len() as usize);

@@ -157,7 +157,81 @@ pub mod little_fixed {
     little_fixedu!(LittleFixedU128, LittleFixedDynU128, u128);
 }
 
-pub mod client {}
+pub mod client {
+    use futures::{future::try_join3, TryFutureExt};
+    use std::sync::mpsc::Sender;
+
+    use crate::{
+        client::{self, CaptureTap, RFChain},
+        Attens, Gen3RpcError, Hertz, SnapAvg,
+    };
+
+    use num::Complex;
+
+    #[derive(Debug)]
+    pub struct Sweep {
+        pub config: SweepConfig,
+        pub sweep_result: Vec<(Hertz, SnapAvg)>,
+        pub fft_scale: u16,
+        pub attens: Attens,
+        pub dactable: Box<[Complex<i16>; 524288]>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct SweepConfig {
+        pub freqs: Vec<Hertz>,
+        pub attens: Attens,
+        pub fft_scale: u16,
+        pub average: u64,
+    }
+
+    impl SweepConfig {
+        pub async fn sweep_inner(
+            &self,
+            capture: &client::Capture,
+            tap: client::Tap<'_>,
+            if_board: &mut client::IFBoard,
+            dsp_scale: &mut client::DSPScale,
+            dac_table: &client::DACTable,
+            channel: Option<Sender<(Hertz, SnapAvg)>>,
+        ) -> Result<Sweep, Gen3RpcError> {
+            let (attens, fft_scale, dac) = try_join3(
+                if_board.set_attens(self.attens).map_err(Gen3RpcError::from),
+                dsp_scale
+                    .set_fft_scale(self.fft_scale)
+                    .map_err(Gen3RpcError::from),
+                dac_table.get_dac_table().map_err(Gen3RpcError::from),
+            )
+            .await?;
+            let mut sweep_result = Vec::with_capacity(self.average as usize);
+            for freq in self.freqs.iter() {
+                let h = if_board.set_freq(*freq).await?;
+                let ct = CaptureTap {
+                    rfchain: &RFChain {
+                        dac_table,
+                        if_board,
+                        dsp_scale,
+                    },
+                    tap: tap.clone(),
+                };
+                let a = capture.average(ct, self.average).await?;
+                sweep_result.push((h, a.clone()));
+                if let Some(c) = &channel {
+                    if c.send((h, a)).is_err() {
+                        return Err(Gen3RpcError::Interupted);
+                    }
+                }
+            }
+            Ok(Sweep {
+                config: self.clone(),
+                sweep_result,
+                fft_scale,
+                attens,
+                dactable: dac,
+            })
+        }
+    }
+}
 
 pub mod server {
     use crate::{

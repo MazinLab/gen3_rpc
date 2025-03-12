@@ -1,8 +1,9 @@
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
-use futures::AsyncReadExt;
+use futures::{AsyncReadExt, future::try_join_all};
 use gen3_rpc::{
     Attens, DDCChannelConfig, Hertz,
     client::{self, CaptureTap, RFChain, Tap},
+    utils::client::SweepConfig,
 };
 use num_complex::Complex;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -32,21 +33,31 @@ pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std:
             tokio::task::spawn_local(rpc_system);
 
             let dactable = board.get_dac_table().await?;
-            let mut dsp_scale = board.get_dsp_scale().await?.try_into_mut().await?.unwrap_or_else(|_| todo!());
+            let mut dsp_scale = board
+                .get_dsp_scale()
+                .await?
+                .try_into_mut()
+                .await?
+                .unwrap_or_else(|_| todo!());
             let ddc = board.get_ddc().await?;
             let capture = board.get_capture().await?;
-            let mut ifboard = board.get_if_board().await?.try_into_mut().await?.unwrap_or_else(|_| todo!());
+            let mut ifboard = board
+                .get_if_board()
+                .await?
+                .try_into_mut()
+                .await?
+                .unwrap_or_else(|_| todo!());
 
             println!(
                 "Setting IFBoard Freq: {:#?}",
-                ifboard.set_freq(Hertz::new(6_100_000_000, 1)).await
+                ifboard.set_freq(Hertz::new(6_000_000_000, 1)).await
             );
 
             println!(
                 "Setting IFBoard Atten: {:#?}",
                 ifboard
                     .set_attens(Attens {
-                        input: 60.,
+                        input: 61.,
                         output: 61.,
                     })
                     .await
@@ -133,6 +144,46 @@ pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std:
                 .await
                 .unwrap();
             println!("DDC Snap: {:#?}", ddciq);
+
+            let chans_256 = try_join_all((0..256).map(|i| {
+                ddc.allocate_channel(DDCChannelConfig {
+                    source_bin: 0,
+                    ddc_freq: 0,
+                    dest_bin: None,
+                    rotation: 0,
+                    center: Complex::new(i * 32, i * 32),
+                })
+            }))
+            .await
+            .unwrap();
+
+            let sweep_freqs = (-16..16)
+                .map(|i| Hertz::new(6_000_000_000 + i * 8192, 1))
+                .collect();
+
+            let sc = SweepConfig {
+                freqs: sweep_freqs,
+                attens: Attens {
+                    input: 60.,
+                    output: 60.,
+                },
+                fft_scale: 0xfff,
+                average: 1024,
+            };
+
+            let sweep = sc
+                .sweep_inner(
+                    &capture,
+                    Tap::DDCIQ(&chans_256.iter().collect::<Vec<_>>()),
+                    &mut ifboard,
+                    &mut dsp_scale,
+                    &dactable,
+                    None,
+                )
+                .await
+                .unwrap();
+
+            println!("{:?}", sweep.sweep_result);
 
             Ok(())
         })

@@ -7,6 +7,7 @@ use crate::*;
 
 use super::gen3rpc_capnp;
 use super::gen3rpc_capnp::capture::capture_error::Which as CEWhich;
+use super::gen3rpc_capnp::complex_float64::Reader as CF64Reader;
 use super::gen3rpc_capnp::complex_int16::Reader as C16Reader;
 use super::gen3rpc_capnp::complex_int32::Reader as C32Reader;
 use super::gen3rpc_capnp::ddc::capabilities::bin_control::Which as BCWhich;
@@ -17,6 +18,7 @@ use super::gen3rpc_capnp::option::option::Which as OWhich;
 use super::gen3rpc_capnp::rational::Reader as RatReader;
 use super::gen3rpc_capnp::result::result::Which as RWhich;
 use super::gen3rpc_capnp::snap::snap::Which as SWhich;
+use super::gen3rpc_capnp::snap::snap_avg::Which as SAWhich;
 
 use capnp::{
     capability::FromClientHook,
@@ -45,6 +47,7 @@ pub struct RFChain<'a> {
     pub dsp_scale: &'a DSPScale,
 }
 
+#[derive(Clone)]
 pub enum Tap<'a> {
     RawIQ,
     DDCIQ(&'a [&'a SharedDroppableReference<gen3rpc_capnp::ddc_channel::Client, ()>]),
@@ -124,6 +127,12 @@ impl<'a> From<RatReader<'a>> for Rational64 {
     }
 }
 
+impl<'a> From<CF64Reader<'a>> for Complex<f64> {
+    fn from(value: CF64Reader<'a>) -> Self {
+        Self::new(value.get_real(), value.get_imag())
+    }
+}
+
 impl<'a> From<C16Reader<'a>> for Complex<i16> {
     fn from(value: C16Reader<'a>) -> Self {
         Self::new(value.get_real(), value.get_imag())
@@ -137,7 +146,7 @@ impl<'a> From<C32Reader<'a>> for Complex<i32> {
 }
 
 pub struct ClientState<T: FromClientHook + HasTypeId, S> {
-    client: T,
+    pub(crate) client: T,
     state: S,
 }
 
@@ -411,6 +420,64 @@ impl DDC {
 }
 
 impl Capture {
+    pub async fn average(&self, tap: CaptureTap<'_>, length: u64) -> Result<SnapAvg, CaptureError> {
+        let mut request = self.client.average_request();
+        let mut rtap = request.get().init_tap();
+        let mut rfchain = rtap.reborrow().init_rf_chain();
+        rfchain.set_dac_table(tap.rfchain.dac_table.client.clone());
+        rfchain.set_if_board(tap.rfchain.if_board.client.clone());
+        rfchain.set_dsp_scale(tap.rfchain.dsp_scale.client.clone());
+
+        match tap.tap {
+            Tap::RawIQ => {
+                rtap.set_raw_iq(());
+            }
+            Tap::DDCIQ(ddcs) => {
+                let mut taps = rtap.init_ddc_iq(ddcs.len() as u32);
+                for (i, ddc) in ddcs.iter().enumerate() {
+                    taps.set(i as u32, ddc.client.client.clone().into_client_hook())
+                }
+            }
+            Tap::Phase(ddcs) => {
+                let mut taps = rtap.init_phase(ddcs.len() as u32);
+                for (i, ddc) in ddcs.iter().enumerate() {
+                    taps.set(i as u32, ddc.client.client.clone().into_client_hook())
+                }
+            }
+        }
+        request.get().set_length(length);
+        let response = request.send().promise.await?;
+        let avg = response
+            .get()?
+            .get_result()?
+            .get_request()
+            .send()
+            .promise
+            .await?;
+        let res: Result<_, _> = avg.get()?.get_result()?.which()?.into();
+
+        match res {
+            Ok(s) => match s?.which()? {
+                SAWhich::RawIq(r) => {
+                    let r = r?;
+                    Ok(SnapAvg::Raw(r.into()))
+                }
+                SAWhich::DdcIq(d) => {
+                    let d = d?;
+                    Ok(SnapAvg::DdcIQ(d.iter().map(|c| c.into()).collect()))
+                }
+                SAWhich::Phase(p) => {
+                    let p = p?;
+                    Ok(SnapAvg::Phase(p.iter().collect()))
+                }
+            },
+            Err(e) => {
+                let a: Result<_, _> = e?.which();
+                Err(a?.into())
+            }
+        }
+    }
+
     pub async fn capture(&self, tap: CaptureTap<'_>, length: u64) -> Result<Snap, CaptureError> {
         let mut request = self.client.capture_request();
         let mut rtap = request.get().init_tap();
