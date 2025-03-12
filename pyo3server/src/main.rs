@@ -466,6 +466,7 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
             // Start the board, clocks and MTS
             let ol = Python::with_gil(|py| -> PyObject {
                 // Import MKIDGen3 to register the drivers and start the clocks
+                info!("Loading mkidgen3 python library");
                 let mkidgen3 = py.import("mkidgen3").unwrap();
 
                 info!("Configuring RFDC Clocking");
@@ -484,7 +485,7 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                     .call((), Some(&kwargs))
                     .unwrap();
 
-                info!("Loading Bitstream");
+                info!("Loading pynq python library");
                 let pynq = py.import("pynq").unwrap();
                 let overlay = pynq.getattr("Overlay").unwrap();
                 let kwargs = PyDict::new(py);
@@ -493,9 +494,10 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                 kwargs
                     .set_item("bitfile_name", "/home/xilinx/8tap.bit")
                     .unwrap();
+                info!("Loading Bitstream");
                 let ol = overlay.call((), Some(&kwargs)).unwrap();
 
-                debug!("");
+                debug!("Installing Overlay Quirks");
                 mkidgen3
                     .getattr("quirks")
                     .unwrap()
@@ -562,7 +564,8 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
             tokio::task::spawn_local(async {
                 loop {
                     if Python::with_gil(|py| -> _ { py.check_signals() }).is_err() {
-                        break;
+                        error!("Recieved keyboard interrupt, exiting");
+                        std::process::exit(-1);
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -590,6 +593,7 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+    info!("Launching python interpereter");
     pyo3::prepare_freethreaded_python();
     let rt = Runtime::new()?;
     rt.block_on(async { pyo3server(4242).await })
