@@ -66,12 +66,19 @@ impl SetterInput<gen3rpc_capnp::complex_int16::Owned> for Complex<i16> {
 #[derive(Debug, Clone)]
 pub enum Gen3RpcError {
     CapnProto(capnp::Error),
+    Interupted,
     Capture(CaptureError),
     ChannelConfig(ChannelConfigError),
     ChannelAllocation(ChannelAllocationError),
     Frequency(FrequencyError),
     Atten(AttenError),
     DSPScale(DSPScaleError),
+}
+
+impl<T: Into<capnp::Error>> From<T> for Gen3RpcError {
+    fn from(value: T) -> Self {
+        Gen3RpcError::CapnProto(value.into())
+    }
 }
 
 #[derive(Debug, Clone)]
