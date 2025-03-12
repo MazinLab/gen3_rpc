@@ -1,7 +1,7 @@
 use env_logger::Env;
 use log::{debug, error, info};
 
-use numpy::{Complex32, Ix2, Ix3, PyArrayLike2, PyArrayLike3, ToPyArray};
+use numpy::{Complex32, Ix2, Ix3, PyArrayLike2, PyArrayLike3, PyUntypedArrayMethods, ToPyArray};
 use pyo3::{
     prelude::*,
     types::{PyDict, PyNone},
@@ -173,6 +173,7 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                         let snap = cap.call_method(py, "capture", (length, "ddciq"), None)?;
                         let snaparr: PyArrayLike3<i16> =
                             npar.call1((&snap,)).unwrap().extract().unwrap();
+                        debug!("Array Shape {:?}", snaparr.shape());
                         let s = gen3_rpc::Snap::DdcIQ(
                             d.into_iter()
                                 .map(|d| {
@@ -200,6 +201,7 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                         let snap = cap.call_method(py, "capture", (length, "filtphase"), None)?;
                         let snaparr: PyArrayLike2<i16> =
                             npar.call1((&snap,)).unwrap().extract().unwrap();
+                        debug!("Array Shape {:?}", snaparr.shape());
                         let s = gen3_rpc::Snap::Phase(
                             p.into_iter()
                                 .map(|d| {

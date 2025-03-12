@@ -32,21 +32,31 @@ pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std:
             tokio::task::spawn_local(rpc_system);
 
             let dactable = board.get_dac_table().await?;
-            let mut dsp_scale = board.get_dsp_scale().await?.try_into_mut().await?.unwrap_or_else(|_| todo!());
+            let mut dsp_scale = board
+                .get_dsp_scale()
+                .await?
+                .try_into_mut()
+                .await?
+                .unwrap_or_else(|_| todo!());
             let ddc = board.get_ddc().await?;
             let capture = board.get_capture().await?;
-            let mut ifboard = board.get_if_board().await?.try_into_mut().await?.unwrap_or_else(|_| todo!());
+            let mut ifboard = board
+                .get_if_board()
+                .await?
+                .try_into_mut()
+                .await?
+                .unwrap_or_else(|_| todo!());
 
             println!(
                 "Setting IFBoard Freq: {:#?}",
-                ifboard.set_freq(Hertz::new(6_100_000_000, 1)).await
+                ifboard.set_freq(Hertz::new(6_000_000_000, 1)).await
             );
 
             println!(
                 "Setting IFBoard Atten: {:#?}",
                 ifboard
                     .set_attens(Attens {
-                        input: 60.,
+                        input: 61.,
                         output: 61.,
                     })
                     .await
@@ -73,71 +83,98 @@ pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std:
             let scale = dsp_scale.set_fft_scale(0xF0F0).await;
             println!("Set Invalid Scale: {:?}", scale);
 
-            let channela = ddc
-                .allocate_channel(DDCChannelConfig {
+            let scale = dsp_scale.set_fft_scale(0xFFF).await;
+            println!("Set Valid Scale: {:?}", scale);
+
+            // let channela = ddc
+            //     .allocate_channel(DDCChannelConfig {
+            //         source_bin: 0,
+            //         ddc_freq: 0,
+            //         dest_bin: None,
+            //         rotation: 0,
+            //         center: Complex::new(0, 0),
+            //     })
+            //     .await
+            //     .unwrap();
+
+            // let channelb = if let Ok(b) = ddc
+            //     .allocate_channel(DDCChannelConfig {
+            //         source_bin: 0,
+            //         ddc_freq: 10,
+            //         dest_bin: Some(11),
+            //         rotation: 0,
+            //         center: Complex::i(),
+            //     })
+            //     .await
+            // {
+            //     b
+            // } else {
+            //     println!("Allocating DDC Channel with specific bin 11 failed, probably already in use, allocating without specified bin");
+            //     ddc.allocate_channel(DDCChannelConfig {
+            //         source_bin: 0,
+            //         ddc_freq: 10,
+            //         dest_bin: None,
+            //         rotation: 0,
+            //         center: Complex::i(),
+            //     })
+            //     .await
+            //     .unwrap()
+            // };
+
+            // let channels = vec![&channela, &channelb];
+
+            // let rfchain = RFChain {
+            //     dac_table: &dactable,
+            //     if_board: &ifboard,
+            //     dsp_scale: &dsp_scale,
+            // };
+
+            // let raw = capture
+            //     .capture(CaptureTap::new(&rfchain, Tap::RawIQ), 16)
+            //     .await
+            //     .unwrap();
+            // println!("Raw Snap: {:#?}", raw);
+
+            // let phase = capture
+            //     .capture(CaptureTap::new(&rfchain, Tap::Phase(&channels)), 16)
+            //     .await
+            //     .unwrap();
+            // println!("Phase Snap: {:#?}", phase);
+
+            // let ddciq = capture
+            //     .capture(CaptureTap::new(&rfchain, Tap::DDCIQ(&channels)), 16)
+            //     .await
+            //     .unwrap();
+            // println!("DDC Snap: {:#?}", ddciq);
+
+            let chans_256 = try_join_all((0..16).map(|i| {
+                ddc.allocate_channel(DDCChannelConfig {
                     source_bin: 0,
                     ddc_freq: 0,
                     dest_bin: None,
                     rotation: 0,
-                    center: Complex::new(0, 0),
+                    center: Complex::new(i * 32, i * 32),
                 })
-                .await
-                .unwrap();
+            }))
+            .await
+            .unwrap();
 
-            let channelb = if let Ok(b) = ddc
-                .allocate_channel(DDCChannelConfig {
-                    source_bin: 0,
-                    ddc_freq: 10,
-                    dest_bin: Some(11),
-                    rotation: 0,
-                    center: Complex::i(),
-                })
-                .await
-            {
-                b
-            } else {
-                println!("Allocating DDC Channel with specific bin 11 failed, probably already in use, allocating without specified bin");
-                ddc.allocate_channel(DDCChannelConfig {
-                    source_bin: 0,
-                    ddc_freq: 10,
-                    dest_bin: None,
-                    rotation: 0,
-                    center: Complex::i(),
-                })
-                .await
-                .unwrap()
-            };
-
-            let channels = vec![&channela, &channelb];
-
-            let rfchain = RFChain {
-                dac_table: &dactable,
-                if_board: &ifboard,
-                dsp_scale: &dsp_scale,
-            };
-
-            let raw = capture
-                .capture(CaptureTap::new(&rfchain, Tap::RawIQ), 16)
-                .await
-                .unwrap();
-            println!("Raw Snap: {:#?}", raw);
-
-            let phase = capture
-                .capture(CaptureTap::new(&rfchain, Tap::Phase(&channels)), 16)
-                .await
-                .unwrap();
-            println!("Phase Snap: {:#?}", phase);
-
-            let ddciq = capture
-                .capture(CaptureTap::new(&rfchain, Tap::DDCIQ(&channels)), 16)
-                .await
-                .unwrap();
-            println!("DDC Snap: {:#?}", ddciq);
-
-            let chans_256 = try_join_all((0..16).map(|_i| ddc.allocate_channel(DDCChannelConfig { source_bin: 0, ddc_freq: 0, dest_bin: None, rotation: 0, center:  Complex::new(0, 0)}))).await.unwrap();
-
-            let sweep_freqs = (-1..1).map(|i| Hertz::new(6_000_000_000 + i * 8192, 1)).collect();
-            println!("{:#?}", capture.sweep(Tap::DDCIQ(&chans_256.iter().collect::<Vec<_>>()), &dactable, &ifboard, &dsp_scale, 1024, sweep_freqs).await);
+            let sweep_freqs = (-1..1)
+                .map(|i| Hertz::new(6_000_000_000 + i * 8192, 1))
+                .collect();
+            println!(
+                "{:#?}",
+                capture
+                    .sweep(
+                        Tap::DDCIQ(&chans_256.iter().collect::<Vec<_>>()),
+                        &dactable,
+                        &ifboard,
+                        &dsp_scale,
+                        1024,
+                        sweep_freqs
+                    )
+                    .await
+            );
 
             Ok(())
         })
