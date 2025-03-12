@@ -7,6 +7,7 @@ use crate::*;
 
 use super::gen3rpc_capnp;
 use super::gen3rpc_capnp::capture::capture_error::Which as CEWhich;
+use super::gen3rpc_capnp::complex_float64::Reader as CF64Reader;
 use super::gen3rpc_capnp::complex_int16::Reader as C16Reader;
 use super::gen3rpc_capnp::complex_int32::Reader as C32Reader;
 use super::gen3rpc_capnp::ddc::capabilities::bin_control::Which as BCWhich;
@@ -46,6 +47,7 @@ pub struct RFChain<'a> {
     pub dsp_scale: &'a DSPScale,
 }
 
+#[derive(Clone)]
 pub enum Tap<'a> {
     RawIQ,
     DDCIQ(&'a [&'a SharedDroppableReference<gen3rpc_capnp::ddc_channel::Client, ()>]),
@@ -122,6 +124,12 @@ impl From<BCWhich> for BinControl {
 impl<'a> From<RatReader<'a>> for Rational64 {
     fn from(value: RatReader<'a>) -> Self {
         Rational64::new(value.get_numerator(), value.get_denominator())
+    }
+}
+
+impl<'a> From<CF64Reader<'a>> for Complex<f64> {
+    fn from(value: CF64Reader<'a>) -> Self {
+        Self::new(value.get_real(), value.get_imag())
     }
 }
 
@@ -412,89 +420,64 @@ impl DDC {
 }
 
 impl Capture {
-    pub async fn sweep(
-        &self,
-        tap: Tap<'_>,
-        dac_table: &DACTable,
-        if_board: &IFBoard,
-        dsp_scale: &DSPScale,
-        length: usize,
-        freqs: Vec<Hertz>,
-    ) -> Vec<SnapAvg> {
-        let mut results: Vec<SnapAvg> = Vec::with_capacity(length);
-        for freq in freqs.into_iter() {
-            let mut request = if_board.client.set_freq_request();
-            let mut nd = request.get().init_freq().init_frequency();
-            nd.set_numerator(*freq.numer());
-            nd.set_denominator(*freq.denom());
-            request.send().promise.await.unwrap();
+    pub async fn average(&self, tap: CaptureTap<'_>, length: u64) -> Result<SnapAvg, CaptureError> {
+        let mut request = self.client.average_request();
+        let mut rtap = request.get().init_tap();
+        let mut rfchain = rtap.reborrow().init_rf_chain();
+        rfchain.set_dac_table(tap.rfchain.dac_table.client.clone());
+        rfchain.set_if_board(tap.rfchain.if_board.client.clone());
+        rfchain.set_dsp_scale(tap.rfchain.dsp_scale.client.clone());
 
-            let mut request = self.client.average_request();
-            let mut rtap = request.get().init_tap();
-            let mut rfchain = rtap.reborrow().init_rf_chain();
-            rfchain.set_dac_table(dac_table.client.clone());
-            rfchain.set_if_board(if_board.client.clone());
-            rfchain.set_dsp_scale(dsp_scale.client.clone());
-
-            match tap {
-                Tap::RawIQ => {
-                    rtap.set_raw_iq(());
-                }
-                Tap::DDCIQ(ddcs) => {
-                    let mut taps = rtap.init_ddc_iq(ddcs.len() as u32);
-                    for (i, ddc) in ddcs.iter().enumerate() {
-                        taps.set(i as u32, ddc.client.client.clone().into_client_hook())
-                    }
-                }
-                Tap::Phase(ddcs) => {
-                    let mut taps = rtap.init_phase(ddcs.len() as u32);
-                    for (i, ddc) in ddcs.iter().enumerate() {
-                        taps.set(i as u32, ddc.client.client.clone().into_client_hook())
-                    }
+        match tap.tap {
+            Tap::RawIQ => {
+                rtap.set_raw_iq(());
+            }
+            Tap::DDCIQ(ddcs) => {
+                let mut taps = rtap.init_ddc_iq(ddcs.len() as u32);
+                for (i, ddc) in ddcs.iter().enumerate() {
+                    taps.set(i as u32, ddc.client.client.clone().into_client_hook())
                 }
             }
-            request.get().set_length(length as u64);
-            let response = request.send().promise.await.unwrap();
-            let avg = response
-                .get()
-                .unwrap()
-                .get_result()
-                .unwrap()
-                .get_request()
-                .send()
-                .promise
-                .await
-                .unwrap();
-            let res: Result<_, _> = avg
-                .get()
-                .unwrap()
-                .get_result()
-                .unwrap()
-                .which()
-                .unwrap()
-                .into();
-            let res = res.unwrap().unwrap();
-            match res.which().unwrap() {
-                SAWhich::RawIq(r) => {
-                    let r = r.unwrap();
-                    results.push(SnapAvg::Raw(Complex::new(r.get_real(), r.get_imag())));
-                }
-                SAWhich::DdcIq(d) => {
-                    let d = d.unwrap();
-                    results.push(SnapAvg::DdcIQ(
-                        d.into_iter()
-                            .map(|d| Complex::new(d.get_real(), d.get_imag()))
-                            .collect(),
-                    ));
-                }
-                SAWhich::Phase(p) => {
-                    let p = p.unwrap();
-                    results.push(SnapAvg::Phase(p.into_iter().collect()));
+            Tap::Phase(ddcs) => {
+                let mut taps = rtap.init_phase(ddcs.len() as u32);
+                for (i, ddc) in ddcs.iter().enumerate() {
+                    taps.set(i as u32, ddc.client.client.clone().into_client_hook())
                 }
             }
         }
-        results
+        request.get().set_length(length);
+        let response = request.send().promise.await?;
+        let avg = response
+            .get()?
+            .get_result()?
+            .get_request()
+            .send()
+            .promise
+            .await?;
+        let res: Result<_, _> = avg.get()?.get_result()?.which()?.into();
+
+        match res {
+            Ok(s) => match s?.which()? {
+                SAWhich::RawIq(r) => {
+                    let r = r?;
+                    Ok(SnapAvg::Raw(r.into()))
+                }
+                SAWhich::DdcIq(d) => {
+                    let d = d?;
+                    Ok(SnapAvg::DdcIQ(d.iter().map(|c| c.into()).collect()))
+                }
+                SAWhich::Phase(p) => {
+                    let p = p?;
+                    Ok(SnapAvg::Phase(p.iter().collect()))
+                }
+            },
+            Err(e) => {
+                let a: Result<_, _> = e?.which();
+                Err(a?.into())
+            }
+        }
     }
+
     pub async fn capture(&self, tap: CaptureTap<'_>, length: u64) -> Result<Snap, CaptureError> {
         let mut request = self.client.capture_request();
         let mut rtap = request.get().init_tap();
