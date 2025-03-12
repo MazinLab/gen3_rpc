@@ -6,9 +6,11 @@ edition = "2024"
 [dependencies]
 capnp = "0.20.5"
 capnp-rpc = "0.20.3"
+env_logger = "0.11.7"
 futures = "0.3.31"
 futures-io = "0.3.31"
 gen3_rpc = { version = "0.1.0", path = "../gen3_rpc" }
+log = "0.4.26"
 num = "0.4.3"
 num-complex = "0.4.6"
 numpy = "0.23.0"

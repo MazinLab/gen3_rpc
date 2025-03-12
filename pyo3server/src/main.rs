@@ -1,3 +1,5 @@
+use log::{debug, error, info};
+
 use numpy::{Complex32, Ix2, Ix3, PyArrayLike2, PyArrayLike3, ToPyArray};
 use pyo3::{
     prelude::*,
@@ -20,6 +22,7 @@ use std::{
     net::{Ipv4Addr, SocketAddrV4},
     ops::Shl,
     sync::{Arc, Mutex, RwLock},
+    time::Duration,
 };
 
 use capnp::capability::Promise;
@@ -137,6 +140,7 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
         Promise::from_future(t.map_ok(move |db| {
             let snap = match db {
                 CaptureTapDestBins::RawIQ => {
+                    info!("Capturing {} Raw IQ Samples", length);
                     let cap = capture.lock().unwrap();
                     Python::with_gil(|py| -> Result<gen3_rpc::Snap, PyErr> {
                         let npar = py.import("numpy").unwrap().getattr("array").unwrap();
@@ -159,6 +163,7 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                     })
                 }
                 CaptureTapDestBins::DdcIQ(d) => {
+                    info!("Capturing {} DDC IQ samples from {} taps", length, d.len());
                     let cap = capture.lock().unwrap();
                     Python::with_gil(|py| -> Result<gen3_rpc::Snap, PyErr> {
                         let npar = py.import("numpy").unwrap().getattr("array").unwrap();
@@ -184,6 +189,7 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                     })
                 }
                 CaptureTapDestBins::Phase(p) => {
+                    info!("Capturing {} phase samples from {} taps", length, p.len());
                     let cap = capture.lock().unwrap();
                     Python::with_gil(|py| -> Result<gen3_rpc::Snap, PyErr> {
                         let npar = py.import("numpy").unwrap().getattr("array").unwrap();
@@ -336,7 +342,7 @@ impl IFBoardG2 {
         let mut handle: Option<PyObject> = None;
         let mut frac_handle: Option<PyObject> = None;
         Python::with_gil(|py| {
-            let ifb = py.import("mkidgen3.drivers.ifboard").unwrap();
+            let ifb = py.import("mkidgen3.equipment_drivers.ifboard").unwrap();
             let ifb = ifb.getattr("IFBoard").unwrap().call0().unwrap();
             ifb.getattr("power_on").unwrap().call0().unwrap();
             handle = Some(ifb.unbind());
@@ -366,6 +372,7 @@ impl IFBoardG2 {
 
 impl IFBoard for IFBoardG2 {
     fn set_lo(&mut self, v: Hertz) -> Result<Hertz, FrequencyError> {
+        info!("Setting LO to {:?}", v);
         self.lo = v;
         Python::with_gil(|py| {
             let kwargs = PyDict::new(py);
@@ -383,6 +390,15 @@ impl IFBoard for IFBoardG2 {
         self.lo
     }
     fn set_attens(&mut self, a: Attens) -> Result<Attens, AttenError> {
+        let a = Attens {
+            input: (a.input * 4.).round() / 4.,
+            output: (a.output * 4.).round() / 4.,
+        };
+        if a.input < 0. || a.output < 0. || a.input > 63.5 || a.output > 63.5 {
+            error!("Attempted to set unachievable attenuation {:?}", a);
+            return Err(AttenError::Unachievable);
+        }
+        info!("Setting attens to {:?}", a);
         self.attens = a;
         Python::with_gil(|py| {
             let kwargs = PyDict::new(py);
@@ -420,6 +436,8 @@ impl DACTableImpl {
 
 impl DACTable for DACTableImpl {
     fn set(&mut self, v: Box<[Complex<i16>; 524288]>) {
+        info!("Setting DAC Table");
+
         self.values = v;
         // Can't map cause we need to keep this off the stack
         for (i, v) in self.values.iter().enumerate() {
@@ -448,6 +466,7 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                 // Import MKIDGen3 to register the drivers and start the clocks
                 let mkidgen3 = py.import("mkidgen3").unwrap();
 
+                info!("Configuring RFDC Clocking");
                 let kwargs = PyDict::new(py);
                 kwargs
                     .set_item("programming_key", "4.096GSPS_MTS_direct")
@@ -463,6 +482,7 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                     .call((), Some(&kwargs))
                     .unwrap();
 
+                info!("Loading Bitstream");
                 let pynq = py.import("pynq").unwrap();
                 let overlay = pynq.getattr("Overlay").unwrap();
                 let kwargs = PyDict::new(py);
@@ -472,6 +492,8 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                     .set_item("bitfile_name", "/home/xilinx/8tap.bit")
                     .unwrap();
                 let ol = overlay.call((), Some(&kwargs)).unwrap();
+
+                debug!("");
                 mkidgen3
                     .getattr("quirks")
                     .unwrap()
@@ -481,6 +503,8 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap()
                     .call_method0("post_configure")
                     .unwrap();
+
+                info!("Configuring MTS");
                 ol.getattr("rfdc")
                     .unwrap()
                     .call_method0("enable_mts")
@@ -488,6 +512,7 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                 ol.unbind()
             });
 
+            info!("Initilizing DDC Control MMIO");
             let (ddc_addr, ddc_range) = Python::with_gil(|py| -> (usize, usize) {
                 let ddcmmio = ol
                     .getattr(py, "photon_pipe")
@@ -532,8 +557,18 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                 PyO3Capture::new(&ol),
             );
             let client: gen3rpc_capnp::gen3_board::Client = capnp_rpc::new_client(board);
+            tokio::task::spawn_local(async {
+                loop {
+                    if Python::with_gil(|py| -> _ { py.check_signals() }).is_err() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            });
+            info!("Waiting For Connections...");
             loop {
                 let (stream, _) = listener.accept().await?;
+                info!("Recieved Connection From {:?}", stream.peer_addr());
                 stream.set_nodelay(true)?;
                 let (reader, writer) =
                     tokio_util::compat::TokioAsyncReadCompatExt::compat(stream).split();
@@ -553,6 +588,7 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
     pyo3::prepare_freethreaded_python();
     pyo3server(4242).await
 }
