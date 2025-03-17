@@ -337,6 +337,20 @@ impl Gen3Board {
     }
 }
 
+impl DDCChannel {
+    pub async fn get(&self) -> Result<ActualizedDDCChannelConfig, capnp::Error> {
+        let response = self.client.get_request().send().promise.await?;
+        let ack = response.get()?;
+        Ok(ActualizedDDCChannelConfig {
+            ddc_freq: ack.get_ddc_freq(),
+            source_bin: ack.get_source_bin(),
+            dest_bin: ack.get_dest_bin(),
+            rotation: ack.get_rotation(),
+            center: Complex::new(ack.get_center()?.get_real(), ack.get_center()?.get_imag()),
+        })
+    }
+}
+
 impl DDC {
     pub async fn allocate_channel(
         &self,

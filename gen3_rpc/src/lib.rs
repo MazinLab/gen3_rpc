@@ -538,7 +538,7 @@ impl SetterInput<gen3rpc_capnp::ddc::capabilities::Owned> for DDCCapabilities {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Attens {
     pub input: f32,
     pub output: f32,

@@ -158,30 +158,348 @@ pub mod little_fixed {
 }
 
 pub mod client {
-    use futures::{future::try_join3, TryFutureExt};
+    use futures::{
+        future::{try_join, try_join_all},
+        TryFutureExt,
+    };
+    use num_complex::Complex64;
     use std::sync::mpsc::Sender;
 
     use crate::{
         client::{self, CaptureTap, RFChain},
-        Attens, Gen3RpcError, Hertz, SnapAvg,
+        ActualizedDDCChannelConfig, Attens, Gen3RpcError, Hertz, SnapAvg,
     };
 
-    use num::Complex;
+    use num::{traits::Inv, Complex};
+
+    use rand::prelude::*;
+    use rustfft::FftPlanner;
+
+    #[derive(PartialEq, Debug, Clone)]
+    pub enum Tone<T: PartialEq> {
+        Single { freq: T, amplitude: f64, phase: f64 },
+    }
+
+    impl<T: PartialEq> Tone<T> {
+        pub fn randomize_phase(&mut self, rng: &mut ThreadRng) {
+            match self {
+                Tone::Single {
+                    freq: _,
+                    amplitude: _,
+                    phase,
+                } => *phase = rng.random_range(0.0..(2. * std::f64::consts::PI)),
+            }
+        }
+
+        pub fn apply_gain(&mut self, gain: f64) {
+            match self {
+                Tone::Single {
+                    freq: _,
+                    amplitude,
+                    phase: _,
+                } => *amplitude *= gain,
+            }
+        }
+    }
+
+    pub type QuantizedTone = Tone<usize>;
+    pub type ExactTone = Tone<Hertz>;
+    pub type ImpreciseTone = Tone<f64>;
+
+    pub trait Quantizable: Sized {
+        fn quantize(self, capabilities: &DACCapabilities) -> Option<QuantizedTone>;
+    }
+
+    impl Quantizable for QuantizedTone {
+        fn quantize(self, _capabilities: &DACCapabilities) -> Option<QuantizedTone> {
+            Some(self)
+        }
+    }
+
+    impl QuantizedTone {
+        fn add_to(&self, ifft: &mut [Complex64]) {
+            match self {
+                Tone::Single {
+                    freq,
+                    amplitude,
+                    phase,
+                } => {
+                    ifft[*freq] += amplitude
+                        * Complex64::exp(2. * std::f64::consts::PI * Complex64::i() * phase)
+                }
+            }
+        }
+    }
+
+    impl Quantizable for ExactTone {
+        fn quantize(self, capabilities: &DACCapabilities) -> Option<QuantizedTone> {
+            match self {
+                Self::Single {
+                    freq,
+                    amplitude,
+                    phase,
+                } => {
+                    let freq = capabilities.bw / 2 + freq;
+                    if capabilities.bw > freq {
+                        return None;
+                    }
+                    let freq = freq * (capabilities.length as i64) / capabilities.bw;
+                    let freq = freq.floor().reduced();
+                    assert!(*freq.denom() == 1);
+                    let freq = *freq.numer();
+                    assert!(freq >= 0);
+                    Some(QuantizedTone::Single {
+                        freq: freq as usize,
+                        amplitude,
+                        phase,
+                    })
+                }
+            }
+        }
+    }
+
+    impl Quantizable for ImpreciseTone {
+        fn quantize(self, capabilities: &DACCapabilities) -> Option<QuantizedTone> {
+            self.to_exact()?.quantize(capabilities)
+        }
+    }
+
+    impl ImpreciseTone {
+        pub fn to_exact(self) -> Option<ExactTone> {
+            match self {
+                Self::Single {
+                    freq,
+                    amplitude,
+                    phase,
+                } => Some(ExactTone::Single {
+                    freq: Hertz::approximate_float(freq)?,
+                    amplitude,
+                    phase,
+                }),
+            }
+        }
+    }
+
+    pub struct DACCapabilities {
+        bw: Hertz,
+        length: usize,
+    }
+
+    impl DACCapabilities {
+        pub fn resolution(&self) -> Hertz {
+            self.bw / (self.length as i64)
+        }
+    }
+
+    pub struct DACBuilder {
+        capabilities: DACCapabilities,
+        tones: Vec<QuantizedTone>,
+    }
+
+    impl DACBuilder {
+        pub fn construct(&self) -> Vec<Complex64> {
+            let mut planer = FftPlanner::new();
+            let fft = planer.plan_fft_inverse(self.capabilities.length);
+            let mut arr = vec![Complex::new(0., 0.); self.capabilities.length];
+            for tone in self.tones.iter() {
+                tone.add_to(&mut arr);
+            }
+            fft.process(&mut arr);
+            arr
+        }
+
+        pub fn add_tones<T: IntoIterator<Item = QuantizedTone>>(mut self, i: T) -> Self {
+            for tone in i.into_iter() {
+                self.tones.push(tone);
+            }
+            self
+        }
+
+        pub fn try_add_tones<T: IntoIterator<Item = QuantizedTone>>(mut self, i: T) -> Self {
+            for tone in i.into_iter() {
+                self.tones.push(tone);
+            }
+            self
+        }
+
+        pub fn apply_gain(mut self, gain: f64) -> Self {
+            for tone in self.tones.iter_mut() {
+                tone.apply_gain(gain);
+            }
+            self
+        }
+
+        pub fn randomize_phases(mut self) -> Self {
+            let mut rng = rand::rng();
+            self.tones
+                .iter_mut()
+                .for_each(|t| t.randomize_phase(&mut rng));
+            self
+        }
+
+        pub fn build(&self) -> Option<Vec<Complex<i16>>> {
+            let p = self.construct();
+            p.into_iter()
+                .map(|c| {
+                    Some(Complex::<i16>::new(
+                        num::cast(c.re * 32764.)?,
+                        num::cast(c.im * 32764.)?,
+                    ))
+                })
+                .collect()
+        }
+
+        pub fn build_dynamic_range(&mut self, dynamic_range: f64) -> (f64, Vec<Complex<i16>>) {
+            let mut max: f64 = 0.0;
+            let p = self.construct();
+            for c in p.iter() {
+                max = max.max(c.re).max(c.im);
+            }
+            let gain = dynamic_range * max.inv();
+            (
+                gain,
+                p.into_iter()
+                    .map(|c| {
+                        Complex::<i16>::new(
+                            num::cast(c.re * 32764. * gain).unwrap(),
+                            num::cast(c.re * 32764. * gain).unwrap(),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    pub mod test {
+        #[test]
+        fn test_scale() {
+            use super::*;
+            use num_complex::ComplexFloat;
+
+            let caps = DACCapabilities {
+                bw: Hertz::new(4_096_000_000, 1),
+                length: 1 << 19,
+            };
+            let tone = QuantizedTone::Single {
+                freq: 1024,
+                amplitude: 1.0,
+                phase: 0.0,
+            };
+            let builder = DACBuilder {
+                capabilities: caps,
+                tones: vec![tone],
+            };
+            let buf = builder.construct();
+            assert_eq!(buf[0].re(), 1.0);
+            assert_eq!(buf[0].im(), 0.0);
+        }
+
+        #[test]
+        fn test_quantize() {
+            use super::*;
+            let caps = DACCapabilities {
+                bw: Hertz::new(4_096_000_000, 1),
+                length: 1 << 19,
+            };
+
+            assert_eq!(caps.resolution(), Hertz::new(78125, 10));
+            let f = ExactTone::Single {
+                freq: caps.resolution() * 16,
+                amplitude: 1.,
+                phase: 1.,
+            };
+
+            let f = f.quantize(&caps);
+            assert_eq!(
+                f.unwrap(),
+                QuantizedTone::Single {
+                    freq: caps.length / 2 + 16,
+                    amplitude: 1.,
+                    phase: 1.
+                }
+            );
+        }
+    }
+
+    #[derive(Debug)]
+    pub enum SweepResult {
+        RawIQ(Vec<(Attens, Vec<Complex64>)>),
+        DdcIQ(Vec<(PowerSetting, Vec<Vec<Complex64>>)>),
+        Phase(Vec<(PowerSetting, Vec<Vec<f64>>)>),
+    }
+
+    impl SweepResult {
+        pub fn push(&mut self, snap: SnapAvg, setting: PowerSetting, capacity: usize) {
+            match (snap, self) {
+                (SnapAvg::Raw(r), SweepResult::RawIQ(rh)) => {
+                    for (a, v) in rh.iter_mut().rev() {
+                        if *a == setting.attens {
+                            v.push(r);
+                            assert!(
+                                v.len() < capacity,
+                                "More samples recieved than should have been"
+                            );
+                            return;
+                        }
+                    }
+                    let mut new = Vec::with_capacity(capacity);
+                    new.push(r);
+                    rh.push((setting.attens, new));
+                }
+                (SnapAvg::DdcIQ(d), SweepResult::DdcIQ(dh)) => {
+                    for (a, v) in dh.iter_mut().rev() {
+                        if *a == setting {
+                            v.push(d);
+                            assert!(
+                                v.len() < capacity,
+                                "More samples recieved than should have been"
+                            );
+                            return;
+                        }
+                    }
+                    let mut new = Vec::with_capacity(capacity);
+                    new.push(d);
+                    dh.push((setting, new));
+                }
+                (SnapAvg::Phase(p), SweepResult::Phase(ph)) => {
+                    for (a, v) in ph.iter_mut().rev() {
+                        if *a == setting {
+                            v.push(p);
+                            assert!(
+                                v.len() < capacity,
+                                "More samples recieved than should have been"
+                            );
+                            return;
+                        }
+                    }
+                    let mut new = Vec::with_capacity(capacity);
+                    new.push(p);
+                    ph.push((setting, new));
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
 
     #[derive(Debug)]
     pub struct Sweep {
         pub config: SweepConfig,
-        pub sweep_result: Vec<(Hertz, SnapAvg)>,
-        pub fft_scale: u16,
-        pub attens: Attens,
+        pub sweep_result: SweepResult,
+        pub freqs: Vec<Hertz>,
         pub dactable: Box<[Complex<i16>; 524288]>,
+        pub ddc: Vec<ActualizedDDCChannelConfig>,
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct PowerSetting {
+        attens: Attens,
+        fft_scale: u16,
     }
 
     #[derive(Debug, Clone)]
     pub struct SweepConfig {
         pub freqs: Vec<Hertz>,
-        pub attens: Attens,
-        pub fft_scale: u16,
+        pub settings: Vec<PowerSetting>,
         pub average: u64,
     }
 
@@ -193,41 +511,71 @@ pub mod client {
             if_board: &mut client::IFBoard,
             dsp_scale: &mut client::DSPScale,
             dac_table: &client::DACTable,
-            channel: Option<Sender<(Hertz, SnapAvg)>>,
+            channel: Option<Sender<(Hertz, PowerSetting, SnapAvg)>>,
         ) -> Result<Sweep, Gen3RpcError> {
-            let (attens, fft_scale, dac) = try_join3(
-                if_board.set_attens(self.attens).map_err(Gen3RpcError::from),
-                dsp_scale
-                    .set_fft_scale(self.fft_scale)
-                    .map_err(Gen3RpcError::from),
-                dac_table.get_dac_table().map_err(Gen3RpcError::from),
-            )
-            .await?;
-            let mut sweep_result = Vec::with_capacity(self.average as usize);
-            for freq in self.freqs.iter() {
-                let h = if_board.set_freq(*freq).await?;
-                let ct = CaptureTap {
-                    rfchain: &RFChain {
-                        dac_table,
-                        if_board,
-                        dsp_scale,
-                    },
-                    tap: tap.clone(),
-                };
-                let a = capture.average(ct, self.average).await?;
-                sweep_result.push((h, a.clone()));
-                if let Some(c) = &channel {
-                    if c.send((h, a)).is_err() {
-                        return Err(Gen3RpcError::Interupted);
+            let (mut sweep_result, ddc) = match tap {
+                client::Tap::RawIQ => (
+                    SweepResult::RawIQ(Vec::with_capacity(self.settings.len())),
+                    vec![],
+                ),
+                client::Tap::DDCIQ(t) => {
+                    let ts = try_join_all(t.iter().map(|f| f.get())).await?;
+                    (
+                        SweepResult::DdcIQ(Vec::with_capacity(self.settings.len())),
+                        ts,
+                    )
+                }
+                client::Tap::Phase(t) => {
+                    let ts = try_join_all(t.iter().map(|f| f.get())).await?;
+                    (
+                        SweepResult::Phase(Vec::with_capacity(self.settings.len())),
+                        ts,
+                    )
+                }
+            };
+
+            let mut freqs = Vec::with_capacity(self.freqs.len());
+            for (i, setting) in self.settings.iter().enumerate() {
+                let (attens, fft_scale) = try_join(
+                    if_board
+                        .set_attens(setting.attens)
+                        .map_err(Gen3RpcError::from),
+                    dsp_scale
+                        .set_fft_scale(setting.fft_scale)
+                        .map_err(Gen3RpcError::from),
+                )
+                .await?;
+                let true_setting = PowerSetting { attens, fft_scale };
+
+                for freq in self.freqs.iter() {
+                    let h = if_board.set_freq(*freq).await?;
+                    if i == 0 {
+                        freqs.push(h);
                     }
+                    let ct = CaptureTap {
+                        rfchain: &RFChain {
+                            dac_table,
+                            if_board,
+                            dsp_scale,
+                        },
+                        tap: tap.clone(),
+                    };
+                    let a = capture.average(ct, self.average).await?;
+                    if let Some(c) = &channel {
+                        if c.send((h, true_setting.clone(), a.clone())).is_err() {
+                            return Err(Gen3RpcError::Interupted);
+                        }
+                    }
+                    sweep_result.push(a, true_setting.clone(), self.freqs.len());
                 }
             }
+            assert!(freqs.len() == self.freqs.len());
             Ok(Sweep {
                 config: self.clone(),
                 sweep_result,
-                fft_scale,
-                attens,
-                dactable: dac,
+                freqs,
+                dactable: dac_table.get_dac_table().await?,
+                ddc,
             })
         }
     }
