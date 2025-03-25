@@ -166,14 +166,126 @@ pub mod client {
     use std::sync::mpsc::Sender;
 
     use crate::{
-        client::{self, CaptureTap, RFChain},
-        ActualizedDDCChannelConfig, Attens, Gen3RpcError, Hertz, SnapAvg,
+        client::{self, Capture, CaptureTap, DACTable, DSPScale, IFBoard, RFChain},
+        ActualizedDDCChannelConfig, AttenError, Attens, Gen3RpcError, Hertz, SnapAvg,
     };
 
     use num::{traits::Inv, Complex};
 
     use rand::prelude::*;
     use rustfft::FftPlanner;
+    const FFT_AGC_OPTIONS: [u16; 13] = [
+        0xFFF, 0xF7F, 0x77F, 0x777, 0x757, 0x755, 0x555, 0x515, 0x115, 0x111, 0x101, 0x001, 0x000,
+    ];
+    pub async fn agc(
+        mut output: f32,
+        start: f32,
+        step: f32,
+        dynamic_range: f32,
+        tap: client::Tap<'_>,
+        capture: &Capture,
+        dac_table: &DACTable,
+        if_board: &mut IFBoard,
+        dsp_scale: &mut DSPScale,
+    ) -> Result<PowerSetting, Gen3RpcError> {
+        match tap {
+            client::Tap::RawIQ => todo!(),
+            client::Tap::Phase(_) => todo!(),
+            client::Tap::DDCIQ(_) => (),
+        };
+        let mut input = start;
+        loop {
+            let att = if_board.set_attens(Attens { input, output }).await;
+            match att {
+                Ok(att) => {
+                    output = att.output;
+                    input = att.input;
+                }
+                Err(AttenError::Unachievable) => {
+                    break;
+                }
+                Err(e) => {
+                    if_board
+                        .set_attens(Attens {
+                            input: 63.5,
+                            output: 63.5,
+                        })
+                        .await?;
+                    Err(e)?;
+                }
+            }
+            let snap = capture
+                .capture(
+                    CaptureTap {
+                        rfchain: &RFChain {
+                            dac_table,
+                            if_board,
+                            dsp_scale,
+                        },
+                        tap: client::Tap::RawIQ,
+                    },
+                    1 << 19,
+                )
+                .await?;
+            let m = match snap {
+                crate::Snap::Raw(r) => r.into_iter().fold(0, |a, j| {
+                    a.max((j.re as i32).abs()).max((j.im as i32).abs())
+                }),
+                _ => {
+                    unreachable!()
+                }
+            };
+            let range = m as f32 / 32764.;
+            if range > dynamic_range {
+                input += step;
+                break;
+            }
+            input -= step;
+        }
+        let att = if_board.set_attens(Attens { input, output }).await?;
+        let mut idx = 0;
+        while idx < FFT_AGC_OPTIONS.len() {
+            dsp_scale.set_fft_scale(FFT_AGC_OPTIONS[idx]).await?;
+            let snap = capture
+                .capture(
+                    CaptureTap {
+                        rfchain: &RFChain {
+                            dac_table,
+                            if_board,
+                            dsp_scale,
+                        },
+                        tap: tap.clone(),
+                    },
+                    1 << 19,
+                )
+                .await?;
+            let m = match snap {
+                crate::Snap::DdcIQ(d) => d
+                    .into_iter()
+                    .map(|r| {
+                        r.into_iter().fold(0, |a, j| {
+                            a.max((j.re as i32).abs()).max((j.im as i32).abs())
+                        })
+                    })
+                    .max()
+                    .unwrap_or(0),
+                _ => {
+                    unreachable!()
+                }
+            };
+            let range = m as f32 / 32764.;
+            if range > dynamic_range {
+                idx = idx.saturating_sub(1);
+                break;
+            }
+            idx += 1
+        }
+        idx = idx.min(FFT_AGC_OPTIONS.len());
+        Ok(PowerSetting {
+            attens: att,
+            fft_scale: FFT_AGC_OPTIONS[idx],
+        })
+    }
 
     #[derive(PartialEq, Debug, Clone)]
     pub enum Tone<T: PartialEq> {
@@ -504,7 +616,7 @@ pub mod client {
     }
 
     impl SweepConfig {
-        pub async fn sweep_inner(
+        pub async fn sweep(
             &self,
             capture: &client::Capture,
             tap: client::Tap<'_>,
