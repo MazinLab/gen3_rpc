@@ -157,34 +157,6 @@ pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std:
             .await
             .unwrap();
 
-            let sweep_freqs = (-16..16)
-                .map(|i| Hertz::new(6_000_000_000 + i * 8192, 1))
-                .collect();
-
-            let sc = SweepConfig {
-                freqs: sweep_freqs,
-                attens: Attens {
-                    input: 60.,
-                    output: 60.,
-                },
-                fft_scale: 0xfff,
-                average: 1024,
-            };
-
-            let sweep = sc
-                .sweep_inner(
-                    &capture,
-                    Tap::DDCIQ(&chans_256.iter().collect::<Vec<_>>()),
-                    &mut ifboard,
-                    &mut dsp_scale,
-                    &dactable,
-                    None,
-                )
-                .await
-                .unwrap();
-
-            println!("{:?}", sweep.sweep_result);
-
             Ok(())
         })
         .await
