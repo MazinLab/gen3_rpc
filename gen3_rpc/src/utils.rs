@@ -604,8 +604,8 @@ pub mod client {
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct PowerSetting {
-        attens: Attens,
-        fft_scale: u16,
+        pub attens: Attens,
+        pub fft_scale: u16,
     }
 
     #[derive(Debug, Clone)]
