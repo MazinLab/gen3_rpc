@@ -243,4 +243,26 @@ interface Gen3Board {
   getCapture @2 () -> (capture: Capture);
   getDspScale @3 () -> (dspScale: DspScale);
   getIfBoard @4 () -> (ifBoard: IfBoard);
+  performSweep @5 (sweepConfig :SweepConfig) -> (sweepResult :SweepResult);
 }
+struct Attens {
+    input @0: Float32;
+    output @1: Float32;
+}
+struct PowerSetting {
+    attens @0 :Attens;
+    fftScale @1 :UInt16;
+}
+
+struct SweepConfig {
+    freqs @0 :List(Hertz);
+    settings @1 :List(PowerSetting);
+    average @2 :UInt64;
+}
+struct SweepResult {
+    # Define fields for the sweep result here
+    # Example:
+    data @0 :Text;
+}
+
+
