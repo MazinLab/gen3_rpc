@@ -13,7 +13,7 @@ futures = "0.3.31"
 futures-io = "0.3.31"
 num = "0.4.3"
 num-complex = "0.4.6"
-gen3_rpc = { version = "0.1.0", path = "../gen3_rpc" }
+gen3_rpc = { path = "../gen3_rpc" }
 tokio = { version = "1.43.0", features = ["macros", "net", "rt", "tokio-macros"] }
 tokio-util = { version = "0.7.13", features = ["net", "compat"] }
 capnp = "0.20.5"
