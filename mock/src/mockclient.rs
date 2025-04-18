@@ -3,7 +3,10 @@ use futures::{AsyncReadExt, future::try_join_all};
 use gen3_rpc::{
     Attens, DDCChannelConfig, Hertz,
     client::{self, CaptureTap, RFChain, Tap},
+    utils::client::{PowerSetting, Sweep},
 };
+
+use gen3_rpc::utils::client::SweepConfig;
 use num_complex::Complex;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
@@ -144,7 +147,7 @@ pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std:
                 .unwrap();
             println!("DDC Snap: {:#?}", ddciq);
 
-            let _chans_256 = try_join_all((0..256).map(|i| {
+            let chans_256 = try_join_all((0..256).map(|i| {
                 ddc.allocate_channel(DDCChannelConfig {
                     source_bin: 0,
                     ddc_freq: 0,
@@ -155,6 +158,17 @@ pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std:
             }))
             .await
             .unwrap();
+
+        let config = SweepConfig {
+            freqs: vec![Hertz::new(6_000_000_000, 1), Hertz::new(6_020_000_000, 1)],
+            settings: vec![PowerSetting {
+                attens: Attens { input: 60., output: 60. },
+                fft_scale: 0xfff,
+            }],
+            average: 8192,
+        };
+
+        config.sweep(&capture,  Tap::DDCIQ(&chans_256.iter().collect::<Vec<_>>()), &mut ifboard, &mut dsp_scale, &dactable, None).await.unwrap();
 
             Ok(())
         })
