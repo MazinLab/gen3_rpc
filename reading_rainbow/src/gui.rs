@@ -9,6 +9,7 @@ use crate::worker::{RPCCommand, RPCResponse};
 use eframe::{egui, App, CreationContext, NativeOptions};
 use gen3_rpc::utils::client::{PowerSetting, SweepConfig};
 use gen3_rpc::{Attens, Hertz};
+use log::info;
 use num::Complex;
 use std::process::Command;
 use std::sync::mpsc::{Receiver, Sender};
@@ -569,6 +570,10 @@ impl App for MyApp {
             }
         });
     }
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        println!("Exiting...");
+        self.command.send(RPCCommand::Exit).unwrap();
+    }
 }
 
 // Function to run a command and return the output
@@ -588,7 +593,7 @@ fn run_command(command: &str) -> String {
 
 // Function to set the scale value
 fn set_scale(tx: &Sender<RPCCommand>, scale: u16) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Setting scale to: {}", scale);
+    info!("Setting scale to: {}", scale);
     tx.send(RPCCommand::SetFFTScale(scale))?;
     Ok(())
 }
@@ -598,14 +603,14 @@ fn set_dac_table(
     tx: &Sender<RPCCommand>,
     data: Box<[Complex<i16>; 524288]>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Setting DAC table");
+    info!("Setting DAC table");
     tx.send(RPCCommand::SetDACTable(data))?;
     Ok(())
 }
 
 // Function to set the IF frequency
 fn set_if_freq(tx: &Sender<RPCCommand>, freq: Hertz) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Setting IF frequency to: {}/{}", freq.numer(), freq.denom());
+    info!("Setting IF frequency to: {}/{}", freq.numer(), freq.denom());
     tx.send(RPCCommand::SetIFFreq(freq))?;
     Ok(())
 }
@@ -615,7 +620,7 @@ fn set_if_attens(
     tx: &Sender<RPCCommand>,
     attens: Attens,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!(
+    info!(
         "Setting IF attenuations - Input: {}, Output: {}",
         attens.input, attens.output
     );
@@ -655,5 +660,5 @@ pub fn run_gui(command: Sender<RPCCommand>, response: Receiver<RPCResponse>) {
             }))
         }),
     )
-    .unwrap_or_else(|e| eprintln!("Failed to run native: {}", e));
+    .unwrap();
 }

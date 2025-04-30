@@ -4,9 +4,11 @@ use gen3_rpc::client::Tap;
 use gen3_rpc::utils::client::Sweep;
 use gen3_rpc::utils::client::SweepConfig;
 use gen3_rpc::{client::ExclusiveDroppableReference, Attens, DSPScaleError, Hertz};
+use log::{error, info};
 use num::Complex;
 use std::{
-    net::{Ipv4Addr, SocketAddrV4},
+    fmt::Display,
+    net::ToSocketAddrs,
     sync::mpsc::{Receiver, Sender},
     time::SystemTime,
 };
@@ -14,6 +16,7 @@ use tokio::runtime::Runtime;
 
 /// Define RPC commands
 pub enum RPCCommand {
+    Exit,
     SetFFTScale(u16),
     GetFFTScale,
     GetDACTable,
@@ -37,7 +40,8 @@ pub enum RPCResponse {
     CaptureResult(Vec<Complex<i16>>),
 }
 
-pub fn worker_thread(
+pub fn worker_thread<T: ToSocketAddrs + Display>(
+    addr: T,
     command: Receiver<RPCCommand>,
     response: Sender<RPCResponse>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -45,13 +49,10 @@ pub fn worker_thread(
     rt.block_on(async {
         tokio::task::LocalSet::new()
             .run_until(async move {
-                println!("Attempting to connect to server at 128.111.23.124:4242");
-                let stream = tokio::net::TcpStream::connect(SocketAddrV4::new(
-                    Ipv4Addr::new(128, 111, 23, 124),
-                    4242,
-                ))
-                .await?;
-                println!("Successfully connected to server");
+                info!("Attempting to connect to server at {}", addr);
+                let addr = addr.to_socket_addrs().unwrap().next().unwrap();
+                let stream = tokio::net::TcpStream::connect(addr).await?;
+                info!("Successfully connected to server");
                 stream.set_nodelay(true)?;
                 let (reader, writer) =
                     tokio_util::compat::TokioAsyncReadCompatExt::compat(stream).split();
@@ -101,9 +102,10 @@ pub fn worker_thread(
 
                 loop {
                     match command.recv().unwrap() {
+                        RPCCommand::Exit => return Ok(()),
                         // Handle the SetFFTScale command
                         RPCCommand::SetFFTScale(i) => {
-                            println!("Received SetFFTScale command with value: {}", i);
+                            info!("Received SetFFTScale command with value: {}", i);
                             let r = dsp_scale.set_fft_scale(i).await;
                             match r {
                                 Ok(i) => response.send(RPCResponse::FFTScale(Some(i))).unwrap(),
@@ -124,7 +126,7 @@ pub fn worker_thread(
                             match r {
                                 Ok(d) => response.send(RPCResponse::DACTable(Some(d))).unwrap(),
                                 Err(e) => {
-                                    eprintln!("Failed to get DAC table: {}", e);
+                                    error!("Failed to get DAC table: {}", e);
                                     response.send(RPCResponse::DACTable(None)).unwrap()
                                 }
                             }
@@ -138,7 +140,7 @@ pub fn worker_thread(
                                     .send(RPCResponse::DACTable(Some(data_clone)))
                                     .unwrap(),
                                 Err(e) => {
-                                    eprintln!("Failed to set DAC table: {}", e);
+                                    error!("Failed to set DAC table: {}", e);
                                     response.send(RPCResponse::DACTable(None)).unwrap()
                                 }
                             }
@@ -154,19 +156,19 @@ pub fn worker_thread(
                             match r {
                                 Ok(f) => response.send(RPCResponse::IFFreq(Some(f))).unwrap(),
                                 Err(e) => {
-                                    eprintln!("Failed to set IF frequency: {:?}", e);
+                                    error!("Failed to set IF frequency: {:?}", e);
                                     response.send(RPCResponse::IFFreq(None)).unwrap()
                                 }
                             }
                         }
                         // Handle the GetIFAttens command
                         RPCCommand::GetIFAttens => {
-                            println!("Received GetIFAttens command");
+                            info!("Received GetIFAttens command");
                             let r = if_board.get_attens().await;
                             match r {
                                 Ok(a) => response.send(RPCResponse::IFAttens(Some(a))).unwrap(),
                                 Err(e) => {
-                                    eprintln!("Failed to get IF attenuations: {:?}", e);
+                                    error!("Failed to get IF attenuations: {:?}", e);
                                     response.send(RPCResponse::IFAttens(None)).unwrap()
                                 }
                             }
@@ -177,14 +179,14 @@ pub fn worker_thread(
                             match r {
                                 Ok(a) => response.send(RPCResponse::IFAttens(Some(a))).unwrap(),
                                 Err(e) => {
-                                    eprintln!("Failed to set IF attenuations: {:?}", e);
+                                    error!("Failed to set IF attenuations: {:?}", e);
                                     response.send(RPCResponse::IFAttens(None)).unwrap()
                                 }
                             }
                         }
                         // Handle the PerformCapture command
                         RPCCommand::PerformCapture => {
-                            println!("Performing Capture:");
+                            info!("Performing Capture:");
 
                             // Perform the capture
                             let rfchain = gen3_rpc::client::RFChain {
@@ -204,30 +206,30 @@ pub fn worker_thread(
                                 Ok(snap) => {
                                     match snap {
                                         gen3_rpc::Snap::Raw(data) => {
-                                            println!("Capture successful");
+                                            info!("Capture successful");
                                             response
                                                 .send(RPCResponse::CaptureResult(data))
                                                 .unwrap();
                                         }
                                         _ => {
-                                            eprintln!("Unexpected Snap type: {:?}", snap);
+                                            error!("Unexpected Snap type: {:?}", snap);
                                             // Account for improper capture input
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("Capture failed: {:?}", e); // Error to prevent gui from crashing
+                                    error!("Capture failed: {:?}", e); // Error to prevent gui from crashing
                                     response
                                         .send(RPCResponse::CaptureResult(vec![]))
                                         .unwrap_or_else(|err| {
-                                            eprintln!("Failed to send error response: {:?}", err)
+                                            error!("Failed to send error response: {:?}", err)
                                         }); // Error to prevent gui panic
                                 }
                             }
                         }
                         // Handle the SweepConfig command
                         RPCCommand::SweepConfig(config) => {
-                            println!("Performing Sweep:");
+                            info!("Performing Sweep:");
 
                             let result = config
                                 .sweep(
@@ -242,11 +244,11 @@ pub fn worker_thread(
 
                             match result {
                                 Ok(sweep) => {
-                                    println!("Sweep successful");
+                                    info!("Sweep successful");
                                     response.send(RPCResponse::Sweep(sweep)).unwrap();
                                 }
                                 Err(e) => {
-                                    eprintln!("Sweep failed: {:?}", e);
+                                    error!("Sweep failed: {:?}", e);
                                 }
                             }
                         }

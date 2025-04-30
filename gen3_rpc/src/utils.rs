@@ -174,9 +174,11 @@ pub mod client {
 
     use rand::prelude::*;
     use rustfft::FftPlanner;
+
     const FFT_AGC_OPTIONS: [u16; 13] = [
         0xFFF, 0xF7F, 0x77F, 0x777, 0x757, 0x755, 0x555, 0x515, 0x115, 0x111, 0x101, 0x001, 0x000,
     ];
+
     pub async fn agc(
         mut output: f32,
         start: f32,
