@@ -25,6 +25,8 @@ futures = "0.3"
 num = "0.4.3"
 capnp-rpc = "0.20.3"  # Corrected name
 tokio-util = { version = "0.7.13", features = ["net", "compat"] }
+egui_dock = { version = "0.16.0", features = ["serde"] }
+env_logger = "0.11"
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

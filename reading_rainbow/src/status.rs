@@ -1,16 +1,16 @@
 // Nikki Zivkov 02/10/2025
 // Readout status
 
-// Defining Status struct 
+// Defining Status struct
 pub struct Status {
-    pub status_message: String, // Status message will be string 
+    pub status_message: String, // Status message will be string
 }
 
 // Implimenting methods for Status struct
 impl Status {
     pub fn new() -> Self {
         Self {
-            status_message: String::from("Disconnected"), // Creating default message, will be replaced 
+            status_message: String::from("Disconnected"), // Creating default message, will be replaced
         }
     }
 
@@ -21,9 +21,9 @@ impl Status {
     }
 }
 
-// Implementing default for Status struct 
+// Implementing default for Status struct
 impl Default for Status {
     fn default() -> Self {
-        Self::new() // Creating new default instance so we can keep rechecking status 
+        Self::new() // Creating new default instance so we can keep rechecking status
     }
 }

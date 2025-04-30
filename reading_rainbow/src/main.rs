@@ -1,5 +1,4 @@
 mod gui;
-mod logger;
 mod status;
 mod worker;
 

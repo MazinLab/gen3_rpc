@@ -4,41 +4,48 @@
 // Called to in main
 
 // Importing crates/modules
-use crate::logger::Logger;
 use crate::status::Status;
 use crate::worker::{RPCCommand, RPCResponse};
 use eframe::{egui, App, CreationContext, NativeOptions};
+use gen3_rpc::utils::client::{PowerSetting, SweepConfig};
+use gen3_rpc::{Attens, Hertz};
 use num::Complex;
-use std::process::Command; 
+use std::process::Command;
 use std::sync::mpsc::{Receiver, Sender};
-use gen3_rpc::{Hertz, Attens}; 
-use gen3_rpc::utils::client::{PowerSetting, SweepConfig}; 
-use std::time::{SystemTime, Duration};
+use std::time::{Duration, SystemTime};
 
 // Defining structs
 pub struct MyApp {
-    current_pane: Pane,     // Keeps track of current pane
-    command_input: String,  // Command line input
-    command_output: String, // Command line output
-    logger: Option<Logger>, // Data logger
-    status: Status,         // Device status
+    current_pane: Pane,
+    command_input: String,
+    command_output: String,
+    status: Status,
     settings: Settings,
     command: Sender<RPCCommand>,
     response: Receiver<RPCResponse>,
-    error_message: Option<String>, // Error message
-    dac_table: Option<Box<[Complex<i16>; 524288]>>, // DAC table
-    if_freq: Option<Hertz>, // IF frequency
-    if_attens: Option<Attens>, // Attenuations
-    connection_time: Option<SystemTime>, // Connection timestamp
-    sweep_start_freq: String, // Input for the starting frequency
-    sweep_stop_freq: String,  // Input for the stopping frequency
-    sweep_count: String,      // Input for the total number of counts in frequency list
-    sweep_freqs: Vec<Hertz>,  // Generated list of frequencies
-    sweep_input_atten: String, // Input attenuation (input)
-    sweep_output_atten: String, // Output attenuation (input)
-    sweep_dsp_scale: String,   // Input for DSP scale
-    sweep_average: String,    // Input for the average value
-    sweep_result: Option<String>, // Display Sweep results (non-functional!!!)
+    error_message: Option<String>,
+    dac_table: Option<Box<[Complex<i16>; 524288]>>,
+    if_freq: Option<Hertz>,
+    if_attens: Option<Attens>,
+    connection_time: Option<SystemTime>,
+    /// Input for the starting frequency
+    sweep_start_freq: String,
+    /// Input for the stopping frequency
+    sweep_stop_freq: String,
+    /// Input for the total number of counts in frequency list
+    sweep_count: String,
+    /// Generated list of frequencies
+    sweep_freqs: Vec<Hertz>,
+    /// Input attenuation (input)
+    sweep_input_atten: String,
+    /// Output attenuation (input)
+    sweep_output_atten: String,
+    /// Input for DSP scale
+    sweep_dsp_scale: String,
+    /// Input for the average value
+    sweep_average: String,
+    /// Display Sweep results (non-functional!!!)
+    sweep_result: Option<String>,
 }
 
 // Defining different panes in the gui
@@ -46,24 +53,23 @@ pub struct MyApp {
 enum Pane {
     #[default]
     Settings,
-    Command, 
-    DataLogging,
+    Command,
     Status,
-    DSPScale, 
-    DACTable, 
-    IFBoard, 
-    Sweep, 
+    DSPScale,
+    DACTable,
+    IFBoard,
+    Sweep,
 }
 
 #[derive(Default)]
 struct Settings {
-    fft_scale: String, // Use String to handle text input
-    if_freq: String, // Use String to handle IF frequency input
-    if_input_atten: String, // Use String to handle IF input attenuation
+    fft_scale: String,       // Use String to handle text input
+    if_freq: String,         // Use String to handle IF frequency input
+    if_input_atten: String,  // Use String to handle IF input attenuation
     if_output_atten: String, // Use String to handle IF output attenuation
-    if_freq_mode: String, // Use String to handle IF frequency input (Manual or Board)
-    dsp_scale_mode: String, // Use String to handle DSP scale input (Manual or Board)
-    if_atten_mode: String, // Use String to handle IF attenuation input (Manual or Board)
+    if_freq_mode: String,    // Use String to handle IF frequency input (Manual or Board)
+    dsp_scale_mode: String,  // Use String to handle DSP scale input (Manual or Board)
+    if_atten_mode: String,   // Use String to handle IF attenuation input (Manual or Board)
 }
 
 // Defining each gui pane/clickable functionality
@@ -115,9 +121,6 @@ impl App for MyApp {
             if ui.button("Command Line").clicked() {
                 self.current_pane = Pane::Command;
             }
-            if ui.button("Data Logging").clicked() {
-                self.current_pane = Pane::DataLogging;
-            }
             if ui.button("Status").clicked() {
                 self.current_pane = Pane::Status;
             }
@@ -144,7 +147,7 @@ impl App for MyApp {
                     // Display connection status and timestamp
                     if let Some(connection_time) = self.connection_time {
                         let duration = connection_time.elapsed().unwrap_or(Duration::new(0, 0));
-                        ui.label(format!("Successfully connected to server"));
+                        ui.label("Successfully connected to server");
                         ui.label(format!("Connection duration: {:.2?}", duration));
                     } else {
                         ui.label("Not connected to server");
@@ -169,27 +172,6 @@ impl App for MyApp {
                             .desired_width(f32::INFINITY) // Make the output box fill the pane width
                             .desired_rows(10), // Number of output rows (can adjust)
                     );
-                }
-                // Log Data (non-fully functional) 
-                Pane::DataLogging => {
-                    ui.heading("Data Logging");
-
-                    if ui.button("Start Logging").clicked() {
-                        self.logger =
-                            Some(Logger::new("log.txt").expect("Failed to create log file"));
-                        self.status.update("Logging started");
-                    }
-                    if ui.button("Stop Logging").clicked() {
-                        self.logger = None;
-                        self.status.update("Logging stopped");
-                    }
-
-                    if let Some(logger) = &mut self.logger {
-                        logger.log("Sample data").expect("Failed to log data");
-                        ui.label("Logging data...");
-                    } else {
-                        ui.label("Logging stopped.");
-                    }
                 }
                 Pane::Status => {
                     ui.heading("Status");
@@ -217,7 +199,7 @@ impl App for MyApp {
 
                     // Button to apply scale
                     if ui.button("Apply Scale").clicked() {
-                        let valid_values = vec![4095, 3967, 1919, 1911, 1879, 1877, 1365, 1301, 277, 273, 257, 1, 0];
+                        let valid_values = [4095, 3967, 1919, 1911, 1879, 1877, 1365, 1301, 277, 273, 257, 1, 0];
                         if let Ok(scale_value) = self.settings.fft_scale.parse::<u16>() {
                             // Only pass the value to the worker.rs if it is within the accepted values
                             if valid_values.contains(&scale_value) {
@@ -612,7 +594,10 @@ fn set_scale(tx: &Sender<RPCCommand>, scale: u16) -> Result<(), Box<dyn std::err
 }
 
 // Function to set the DAC table
-fn set_dac_table(tx: &Sender<RPCCommand>, data: Box<[Complex<i16>; 524288]>) -> Result<(), Box<dyn std::error::Error>> {
+fn set_dac_table(
+    tx: &Sender<RPCCommand>,
+    data: Box<[Complex<i16>; 524288]>,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("Setting DAC table");
     tx.send(RPCCommand::SetDACTable(data))?;
     Ok(())
@@ -626,12 +611,17 @@ fn set_if_freq(tx: &Sender<RPCCommand>, freq: Hertz) -> Result<(), Box<dyn std::
 }
 
 // Function to set the IF attenuations
-fn set_if_attens(tx: &Sender<RPCCommand>, attens: Attens) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Setting IF attenuations - Input: {}, Output: {}", attens.input, attens.output);
+fn set_if_attens(
+    tx: &Sender<RPCCommand>,
+    attens: Attens,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "Setting IF attenuations - Input: {}, Output: {}",
+        attens.input, attens.output
+    );
     tx.send(RPCCommand::SetIFAttens(attens))?;
     Ok(())
 }
-
 
 // Outputting the gui
 pub fn run_gui(command: Sender<RPCCommand>, response: Receiver<RPCResponse>) {
@@ -639,16 +629,11 @@ pub fn run_gui(command: Sender<RPCCommand>, response: Receiver<RPCResponse>) {
     eframe::run_native(
         "Reading Rainbow",
         native_options,
-        Box::new(|cc: &CreationContext| {
-            let fonts = egui::FontDefinitions::default(); // Minimal fonts (don't delete)
-            // fonts.font_data.clear(); // Uncomment to remove default fonts (you need to upload a custom font file)
-            cc.egui_ctx.set_fonts(fonts);
-
+        Box::new(|_cc: &CreationContext| {
             Ok(Box::new(MyApp {
                 current_pane: Pane::Settings,
                 command_input: String::new(),
                 command_output: String::new(),
-                logger: None,
                 status: Status::new(),
                 settings: Settings::default(),
                 command,
