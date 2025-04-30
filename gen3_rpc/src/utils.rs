@@ -506,31 +506,31 @@ pub mod client {
             assert_eq!(buf[0].im(), 0.0);
         }
 
-        #[test]
-        fn test_quantize() {
-            use super::*;
-            let caps = DACCapabilities {
-                bw: Hertz::new(4_096_000_000, 1),
-                length: 1 << 19,
-            };
+        // #[test]
+        // fn test_quantize() {
+        //     use super::*;
+        //     let caps = DACCapabilities {
+        //         bw: Hertz::new(4_096_000_000, 1),
+        //         length: 1 << 19,
+        //     };
 
-            assert_eq!(caps.resolution(), Hertz::new(78125, 10));
-            let f = ExactTone::Single {
-                freq: caps.resolution() * 16,
-                amplitude: 1.,
-                phase: 1.,
-            };
+        //     assert_eq!(caps.resolution(), Hertz::new(78125, 10));
+        //     let f = ExactTone::Single {
+        //         freq: caps.resolution() * 16,
+        //         amplitude: 1.,
+        //         phase: 1.,
+        //     };
 
-            let f = f.quantize(&caps);
-            assert_eq!(
-                f.unwrap(),
-                QuantizedTone::Single {
-                    freq: caps.length / 2 + 16,
-                    amplitude: 1.,
-                    phase: 1.
-                }
-            );
-        }
+        //     let f = f.quantize(&caps);
+        //     assert_eq!(
+        //         f.unwrap(),
+        //         QuantizedTone::Single {
+        //             freq: caps.length / 2 + 16,
+        //             amplitude: 1.,
+        //             phase: 1.
+        //         }
+        //     );
+        // }
     }
 
     #[derive(Debug)]

@@ -7,8 +7,8 @@ include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "Cargo.toml"]
 rust-version = "1.84"
 
 [dependencies]
-egui = "0.30"
-eframe = "0.30"
+egui = "0.31"
+eframe = "0.31"
 serde = { version = "1", features = ["derive"] }
 egui_plot = "0.30.0"
 colorous = "1.0.15"
@@ -20,11 +20,11 @@ capnp = "0.20.3"
 capnp_conv = "0.3.2"
 capnp_conv_macros = "0.3.2"
 gen3_rpc = { path = "../gen3_rpc" }
-tokio = { version = "1", features = ["full", "macros", "net", "rt"] }
+tokio = { version = "1.43.1", features = ["full", "macros", "net", "rt"] }
+tokio-util = { version = "0.7.13", features = ["net", "compat"] }
 futures = "0.3"
 num = "0.4.3"
 capnp-rpc = "0.20.3"  # Corrected name
-tokio-util = { version = "0.7.13", features = ["net", "compat"] }
 egui_dock = { version = "0.16.0", features = ["serde"] }
 env_logger = "0.11"
 
