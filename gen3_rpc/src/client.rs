@@ -349,6 +349,19 @@ impl DDCChannel {
             center: Complex::new(ack.get_center()?.get_real(), ack.get_center()?.get_imag()),
         })
     }
+
+    pub async fn set(&mut self, config: ErasedDDCChannelConfig) -> Result<(), ChannelConfigError> {
+        let mut request = self.client.set_request();
+        let mut chan = request.get().init_replace();
+        chan.set_source_bin(config.source_bin);
+        chan.set_ddc_freq(config.ddc_freq);
+        chan.set_rotation(config.rotation);
+        let mut center = chan.reborrow().init_center();
+        center.set_real(config.center.re);
+        center.set_imag(config.center.im);
+        request.send().promise.await?;
+        Ok(())
+    }
 }
 
 impl DDC {
@@ -568,10 +581,7 @@ impl Capture {
 }
 
 impl DACTable {
-    pub async fn set_dac_table(
-        &mut self,
-        data: Box<[Complex<i16>; 524288]>,
-    ) -> Result<(), capnp::Error> {
+    pub async fn set_dac_table(&mut self, data: Vec<Complex<i16>>) -> Result<(), capnp::Error> {
         let mut request = self.client.set_request();
         request.get().init_replace().init_data(data.len() as u32);
         for (i, c) in data.iter().enumerate() {
@@ -583,11 +593,11 @@ impl DACTable {
         Ok(())
     }
 
-    pub async fn get_dac_table(&self) -> Result<Box<[Complex<i16>; 524288]>, capnp::Error> {
+    pub async fn get_dac_table(&self) -> Result<Vec<Complex<i16>>, capnp::Error> {
         let request = self.client.get_request();
         let response = request.send().promise.await?;
 
-        let mut buf = Box::new([Complex::i(); 524288]);
+        let mut buf = vec![Complex::i(); 524288];
 
         for i in 0..response.get()?.get_data()?.len() {
             let v = response.get()?.get_data()?.get(i);

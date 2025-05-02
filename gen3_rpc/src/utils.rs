@@ -600,7 +600,7 @@ pub mod client {
         pub config: SweepConfig,
         pub sweep_result: SweepResult,
         pub freqs: Vec<Hertz>,
-        pub dactable: Box<[Complex<i16>; 524288]>,
+        pub dactable: Vec<Complex<i16>>,
         pub ddc: Vec<ActualizedDDCChannelConfig>,
     }
 

@@ -812,6 +812,7 @@ impl<T: Send + Sync, C> DroppableReferenceImpl<T, C> {
             phantom: PhantomData,
         }
     }
+
     fn lock_mut(&self) -> Result<RwLockWriteGuard<'_, T>, capnp::Error> {
         let ls = self.state.read().unwrap();
         match *ls {

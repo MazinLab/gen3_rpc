@@ -6,6 +6,7 @@ pub mod client;
 pub mod server;
 pub mod utils;
 
+use std::error::Error;
 use std::fmt::Display;
 
 use capnp::traits::{FromPointerBuilder, SetterInput};
@@ -75,6 +76,23 @@ pub enum Gen3RpcError {
     DSPScale(DSPScaleError),
 }
 
+impl Display for Gen3RpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CapnProto(c) => write!(f, "{}", c),
+            Self::Interupted => write!(f, "Gen3RpcError::Interrupted"),
+            Self::Capture(c) => write!(f, "{}", c),
+            Self::ChannelConfig(c) => write!(f, "{}", c),
+            Self::ChannelAllocation(c) => write!(f, "{}", c),
+            Self::Frequency(c) => write!(f, "{}", c),
+            Self::Atten(c) => write!(f, "{}", c),
+            Self::DSPScale(c) => write!(f, "{}", c),
+        }
+    }
+}
+
+impl Error for Gen3RpcError {}
+
 impl<T: Into<capnp::Error>> From<T> for Gen3RpcError {
     fn from(value: T) -> Self {
         Gen3RpcError::CapnProto(value.into())
@@ -87,6 +105,18 @@ pub enum CaptureError {
     UnsupportedTap,
     MemoryUnavailable,
 }
+
+impl Display for CaptureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CapnProto(c) => write!(f, "{}", c),
+            Self::UnsupportedTap => write!(f, "provided capture tap is unsupported by hardware"),
+            Self::MemoryUnavailable => write!(f, "memory unavailable to hold capture on device"),
+        }
+    }
+}
+
+impl Error for CaptureError {}
 
 impl<T: Into<capnp::Error>> From<T> for CaptureError {
     fn from(value: T) -> Self {
@@ -122,6 +152,28 @@ pub enum ChannelConfigError {
     SourceDestIncompatability,
     UsedTooManyBits,
 }
+
+impl Display for ChannelConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CapnProto(c) => write!(f, "{}", c),
+            Self::SourceDestIncompatability => {
+                write!(
+                    f,
+                    "provided destination bin is incompatible with destination bin in bin2res"
+                )
+            }
+            Self::UsedTooManyBits => {
+                write!(
+                    f,
+                    "used more bits than permitied in a configuration variable"
+                )
+            }
+        }
+    }
+}
+
+impl Error for ChannelConfigError {}
 
 impl<T: Into<capnp::Error>> From<T> for ChannelConfigError {
     fn from(value: T) -> Self {
@@ -160,6 +212,19 @@ pub enum ChannelAllocationError {
     DestinationInUse,
     ConfigError(ChannelConfigError),
 }
+
+impl Display for ChannelAllocationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CapnProto(c) => write!(f, "{}", c),
+            Self::OutOfChannels => write!(f, "no more ddc channels available for use"),
+            Self::DestinationInUse => write!(f, "the requested destination bin is already in use"),
+            Self::ConfigError(c) => write!(f, "{}", c),
+        }
+    }
+}
+
+impl Error for ChannelAllocationError {}
 
 impl From<ChannelConfigError> for ChannelAllocationError {
     fn from(value: ChannelConfigError) -> Self {
@@ -210,6 +275,21 @@ pub enum FrequencyError {
     Unachievable,
 }
 
+impl Display for FrequencyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CapnProto(c) => write!(f, "{}", c),
+            Self::CouldntLock => write!(f, "the local oscillator failed to lock"),
+            Self::Unachievable => write!(
+                f,
+                "the requested frequency is out of spec for the local oscilator",
+            ),
+        }
+    }
+}
+
+impl Error for FrequencyError {}
+
 impl<T: Into<capnp::Error>> From<T> for FrequencyError {
     fn from(value: T) -> Self {
         FrequencyError::CapnProto(value.into())
@@ -245,6 +325,21 @@ pub enum AttenError {
     Unsafe,
 }
 
+impl Display for AttenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CapnProto(c) => write!(f, "{}", c),
+            Self::Unachievable => write!(
+                f,
+                "the requested attenuation is out of range for the hardware"
+            ),
+            Self::Unsafe => write!(f, "the requested attenuation would risk hardware damage"),
+        }
+    }
+}
+
+impl Error for AttenError {}
+
 impl<T: Into<capnp::Error>> From<T> for AttenError {
     fn from(value: T) -> Self {
         AttenError::CapnProto(value.into())
@@ -278,6 +373,17 @@ pub enum DSPScaleError {
     CapnProto(capnp::Error),
     Clamped(u16),
 }
+
+impl Display for DSPScaleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CapnProto(c) => write!(f, "{}", c),
+            Self::Clamped(c) => write!(f, "requested scale was clamped to {:x} by hardware", c),
+        }
+    }
+}
+
+impl Error for DSPScaleError {}
 
 impl<T: Into<capnp::Error>> From<T> for DSPScaleError {
     fn from(value: T) -> Self {
