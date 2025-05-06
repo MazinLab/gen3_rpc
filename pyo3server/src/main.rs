@@ -553,7 +553,9 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                 DSPScaleImpl::new(&ol),
                 ChannelAllocator::<TripartiteDDC, 2048>::new(
                     DDCCapabilities {
-                        freq_resolution: Hertz::new(2_000_000, 1 << 11),
+                        opfb_channels: 4096,
+                        opfb_samplerate: Hertz::new(4_096_000_000, 1),
+                        freq_resolution: Hertz::new(15625, 16),
                         freq_bits: 11,
                         rotation_bits: 21,
                         center_bits: 16,

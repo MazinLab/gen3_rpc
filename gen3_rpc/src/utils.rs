@@ -175,7 +175,7 @@ pub mod client {
     use rand::prelude::*;
     use rustfft::FftPlanner;
 
-    const FFT_AGC_OPTIONS: [u16; 13] = [
+    pub const FFT_AGC_OPTIONS: [u16; 13] = [
         0xFFF, 0xF7F, 0x77F, 0x777, 0x757, 0x755, 0x555, 0x515, 0x115, 0x111, 0x101, 0x001, 0x000,
     ];
 
@@ -394,9 +394,10 @@ pub mod client {
         }
     }
 
+    #[derive(Copy, Clone)]
     pub struct DACCapabilities {
-        bw: Hertz,
-        length: usize,
+        pub bw: Hertz,
+        pub length: usize,
     }
 
     impl DACCapabilities {
@@ -406,11 +407,17 @@ pub mod client {
     }
 
     pub struct DACBuilder {
-        capabilities: DACCapabilities,
-        tones: Vec<QuantizedTone>,
+        pub capabilities: DACCapabilities,
+        pub tones: Vec<QuantizedTone>,
     }
 
     impl DACBuilder {
+        pub fn new(caps: DACCapabilities) -> Self {
+            DACBuilder {
+                capabilities: caps,
+                tones: vec![],
+            }
+        }
         pub fn construct(&self) -> Vec<Complex64> {
             let mut planer = FftPlanner::new();
             let fft = planer.plan_fft_inverse(self.capabilities.length);

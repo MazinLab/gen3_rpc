@@ -170,7 +170,9 @@ pub async fn mockserver(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                 DSPScaleMock { fft: 0xfff },
                 ChannelAllocator::<(ActualizedDDCChannelConfig, DDCCapabilities), 2048>::new(
                     DDCCapabilities {
-                        freq_resolution: Hertz::new(1, 1),
+                        opfb_channels: 4096,
+                        opfb_samplerate: Hertz::new(4_096_000_000, 1),
+                        freq_resolution: Hertz::new(15625, 16),
                         freq_bits: 25,
                         rotation_bits: 16,
                         center_bits: 16,

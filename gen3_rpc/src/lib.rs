@@ -6,11 +6,12 @@ pub mod client;
 pub mod server;
 pub mod utils;
 
-use std::error::Error;
 use std::fmt::Display;
+use std::{error::Error, ops::Shl};
 
 use capnp::traits::{FromPointerBuilder, SetterInput};
 use num::Rational64;
+use num::Signed;
 use num_complex::Complex;
 
 pub type Hertz = Rational64;
@@ -615,11 +616,46 @@ impl TryFrom<gen3rpc_capnp::ddc_channel::channel_config::Reader<'_>> for DDCChan
 
 #[derive(Copy, Clone)]
 pub struct DDCCapabilities {
+    pub opfb_channels: u32,
+    pub opfb_samplerate: Hertz,
     pub freq_resolution: Rational64,
     pub freq_bits: u16,
     pub rotation_bits: u16,
     pub center_bits: u16,
     pub bin_control: BinControl,
+}
+
+impl DDCCapabilities {
+    pub fn ddc_freq(&self, tone: Hertz) -> (u32, i32) {
+        let centers = self.bin_centers();
+        let min = centers
+            .into_iter()
+            .min_by(|x, y| (tone - x.1).abs().cmp(&(tone - y.1).abs()))
+            .unwrap();
+
+        (min.0, self.quantize_centered_tone(min.1))
+    }
+    #[inline]
+    pub fn quantize_centered_tone(&self, tone: Hertz) -> i32 {
+        let p = (tone * Hertz::new(1i64.shl(self.freq_bits - 1), 1)).round();
+        assert_eq!(*p.denom(), 1);
+        *p.numer() as i32
+    }
+
+    #[inline]
+    pub fn bin_centers(&self) -> Vec<(u32, Hertz)> {
+        assert!(self.opfb_channels % 2 == 0);
+        (0..self.opfb_channels / 2)
+            .map(|i| {
+                (
+                    i,
+                    Hertz::new(i as i64, 1)
+                        * self.opfb_samplerate
+                        * Hertz::new(1, self.opfb_channels as i64),
+                )
+            })
+            .collect()
+    }
 }
 
 impl SetterInput<gen3rpc_capnp::ddc::capabilities::Owned> for DDCCapabilities {
@@ -636,10 +672,16 @@ impl SetterInput<gen3rpc_capnp::ddc::capabilities::Owned> for DDCCapabilities {
             BinControl::FullSwizzle => builder.reborrow().init_bin_control().set_full_swizzle(()),
             BinControl::None => builder.reborrow().init_bin_control().set_none(()),
         }
+        builder.set_opfb_channels(input.opfb_channels);
+
+        let mut sr = builder.reborrow().init_opfb_sample_rate();
+        sr.set_numerator(*input.opfb_samplerate.numer());
+        sr.set_denominator(*input.opfb_samplerate.denom());
 
         let mut fr = builder.reborrow().init_freq_resolution();
         fr.set_numerator(*input.freq_resolution.numer());
         fr.set_denominator(*input.freq_resolution.denom());
+
         Ok(())
     }
 }

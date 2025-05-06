@@ -160,6 +160,8 @@ interface Ddc {
   }
 
   struct Capabilities {
+    opfbChannels @6 :UInt32;
+    opfbSampleRate @7 :Rational;
     freqResolution @0 :Rational;
     freqBits @1 :UInt16;
     rotationBits @2: UInt16;

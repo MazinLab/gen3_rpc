@@ -281,6 +281,8 @@ impl Gen3Board {
         let client = ddc?.get()?.get_ddc()?;
         let response = client.capabilities_request().send().promise.await?;
         let capabilities = DDCCapabilities {
+            opfb_channels: response.get()?.get_opfb_channels(),
+            opfb_samplerate: response.get()?.get_opfb_sample_rate()?.into(),
             freq_resolution: response.get()?.get_freq_resolution()?.into(),
             freq_bits: response.get()?.get_freq_bits(),
             rotation_bits: response.get()?.get_rotation_bits(),
