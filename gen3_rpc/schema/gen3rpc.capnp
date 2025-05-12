@@ -187,8 +187,15 @@ interface DacTable extends(DroppableReference) {
     data @0 :List(ComplexInt16);
   }
 
+  struct Capabilities {
+    length @0 :UInt64;
+    sampleRate @1 :Rational;
+  }
+
   get @0 () -> DacTable;
   set @1 (replace: DacTable) $mut;
+
+  getCapabilities @2 () -> Capabilities;
 }
 
 interface Snap extends(DroppableReference) {

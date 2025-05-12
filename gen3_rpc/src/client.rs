@@ -29,6 +29,7 @@ use futures;
 use futures_io::{AsyncRead, AsyncWrite};
 use num::Rational64;
 use num_complex::Complex;
+use utils::client::DACCapabilities;
 
 pub struct CaptureTap<'a> {
     pub rfchain: &'a RFChain<'a>,
@@ -583,6 +584,19 @@ impl Capture {
 }
 
 impl DACTable {
+    pub async fn capabilties(&mut self) -> Result<DACCapabilities, capnp::Error> {
+        let request = self.client.get_capabilities_request();
+        let response = request.send().promise.await?;
+        let caps = response.get()?;
+        Ok(DACCapabilities {
+            bw: Hertz::new(
+                caps.get_sample_rate()?.get_numerator(),
+                caps.get_sample_rate()?.get_denominator(),
+            ),
+            length: caps.get_length() as usize,
+        })
+    }
+
     pub async fn set_dac_table(&mut self, data: Vec<Complex<i16>>) -> Result<(), capnp::Error> {
         let mut request = self.client.set_request();
         request.get().init_replace().init_data(data.len() as u32);

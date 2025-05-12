@@ -343,6 +343,26 @@ pub mod client {
                 }
             }
         }
+
+        pub fn to_exact(self, capabilties: &DACCapabilities) -> ExactTone {
+            match self {
+                Self::Single {
+                    freq,
+                    amplitude,
+                    phase,
+                } => {
+                    let spacing = capabilties.bw * Hertz::new(1, capabilties.length as i64);
+
+                    let freq = Hertz::new(freq as i64, 1) * spacing;
+                    let freq = freq - capabilties.bw / 2;
+                    ExactTone::Single {
+                        freq,
+                        amplitude,
+                        phase,
+                    }
+                }
+            }
+        }
     }
 
     impl Quantizable for ExactTone {
@@ -353,8 +373,9 @@ pub mod client {
                     amplitude,
                     phase,
                 } => {
+                    // println!("{} {}", freq, capabilities.bw);
                     let freq = capabilities.bw / 2 + freq;
-                    if capabilities.bw > freq {
+                    if freq > capabilities.bw {
                         return None;
                     }
                     let freq = freq * (capabilities.length as i64) / capabilities.bw;
@@ -472,18 +493,20 @@ pub mod client {
 
         pub fn build_dynamic_range(&mut self, dynamic_range: f64) -> (f64, Vec<Complex<i16>>) {
             let mut max: f64 = 0.0;
+            println!("{:?}", self.tones);
             let p = self.construct();
             for c in p.iter() {
-                max = max.max(c.re).max(c.im);
+                max = max.max(c.re.abs()).max(c.im.abs());
             }
             let gain = dynamic_range * max.inv();
+            println!("{} {}", max, gain);
             (
                 gain,
                 p.into_iter()
                     .map(|c| {
                         Complex::<i16>::new(
                             num::cast(c.re * 32764. * gain).unwrap(),
-                            num::cast(c.re * 32764. * gain).unwrap(),
+                            num::cast(c.im * 32764. * gain).unwrap(),
                         )
                     })
                     .collect(),

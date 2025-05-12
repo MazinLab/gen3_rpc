@@ -11,9 +11,10 @@ use futures::{future::try_join_all, FutureExt, TryFutureExt};
 use num_complex::{Complex, Complex64};
 
 use crate::{
-    utils::little_fixed::LittleFixedDynI32, ActualizedDDCChannelConfig, AttenError, Attens,
-    CaptureError, ChannelAllocationError, ChannelConfigError, DDCCapabilities, DDCChannelConfig,
-    ErasedDDCChannelConfig, FrequencyError, Hertz, Scale16, SnapAvg,
+    utils::{client::DACCapabilities, little_fixed::LittleFixedDynI32},
+    ActualizedDDCChannelConfig, AttenError, Attens, CaptureError, ChannelAllocationError,
+    ChannelConfigError, DDCCapabilities, DDCChannelConfig, ErasedDDCChannelConfig, FrequencyError,
+    Hertz, Scale16, SnapAvg,
 };
 
 pub struct Gen3Board<
@@ -284,6 +285,12 @@ where
     ) -> capnp::capability::Promise<(), capnp::Error> {
         let caps = self.inner.capabilities();
 
+        let mut sr = results.get().init_opfb_sample_rate();
+        sr.set_numerator(*caps.opfb_samplerate.numer());
+        sr.set_denominator(*caps.opfb_samplerate.denom());
+
+        results.get().set_opfb_channels(caps.opfb_channels);
+
         let mut fr = results.get().init_freq_resolution();
         fr.set_numerator(*caps.freq_resolution.numer());
         fr.set_denominator(*caps.freq_resolution.denom());
@@ -446,6 +453,7 @@ impl Snap for crate::Snap {
 pub trait DACTable: Send + Sync + 'static {
     fn set(&mut self, v: Box<[Complex<i16>; 524288]>);
     fn get(&self) -> Box<[Complex<i16>; 524288]>;
+    fn get_capabilities(&self) -> DACCapabilities;
 }
 
 pub trait DDCChannel: Sized + Send + Sync + 'static {
@@ -1272,6 +1280,21 @@ impl<T: DACTable + Send + Sync> crate::gen3rpc_capnp::dac_table::Server
         }
         let mut i = self.inner.write().unwrap();
         i.set(values);
+
+        Promise::ok(())
+    }
+    fn get_capabilities(
+        &mut self,
+        _: crate::gen3rpc_capnp::dac_table::GetCapabilitiesParams,
+        mut response: crate::gen3rpc_capnp::dac_table::GetCapabilitiesResults,
+    ) -> capnp::capability::Promise<(), capnp::Error> {
+        pry!(self.check_shared());
+        let inner = self.inner.read().unwrap();
+        let caps = inner.get_capabilities();
+        response.get().set_length(caps.length as u64);
+        let mut sr = response.get().init_sample_rate();
+        sr.set_numerator(*caps.bw.numer());
+        sr.set_denominator(*caps.bw.denom());
 
         Promise::ok(())
     }

@@ -11,7 +11,7 @@ use gen3_rpc::{
     ActualizedDDCChannelConfig, AttenError, Attens, CaptureError, DDCCapabilities, FrequencyError,
     Hertz, SnapAvg,
     gen3rpc_capnp::{self},
-    utils::{little_fixed::*, server::ChannelAllocator},
+    utils::{client::DACCapabilities, little_fixed::*, server::ChannelAllocator},
 };
 
 use num::Complex;
@@ -460,6 +460,12 @@ impl DACTable for DACTableImpl {
     }
     fn get(&self) -> Box<[Complex<i16>; 524288]> {
         self.values.clone()
+    }
+    fn get_capabilities(&self) -> gen3_rpc::utils::client::DACCapabilities {
+        DACCapabilities {
+            bw: Hertz::new(4_096_000_000, 1),
+            length: 1 << 19,
+        }
     }
 }
 
