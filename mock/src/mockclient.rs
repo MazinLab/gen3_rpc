@@ -8,7 +8,11 @@ use gen3_rpc::{
 
 use gen3_rpc::utils::client::SweepConfig;
 use num_complex::Complex;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::{
+    net::{Ipv4Addr, SocketAddrV4},
+    ops::Deref,
+    slice::Iter,
+};
 
 pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std::error::Error>> {
     tokio::task::LocalSet::new()
@@ -121,7 +125,7 @@ pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std:
                 .unwrap()
             };
 
-            let channels = vec![&channela, &channelb];
+            let channels = vec![channela, channelb];
 
             let rfchain = RFChain {
                 dac_table: &dactable,
@@ -130,19 +134,24 @@ pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std:
             };
 
             let raw = capture
-                .capture(CaptureTap::new(&rfchain, Tap::RawIQ), 16)
+                .capture(CaptureTap::new(rfchain, Tap::<'_, Iter<_>>::RawIQ), 16)
                 .await
                 .unwrap();
             println!("Raw Snap: {:#?}", raw);
 
+            let rfchain = RFChain {
+                dac_table: &dactable,
+                if_board: &ifboard,
+                dsp_scale: &dsp_scale,
+            };
             let phase = capture
-                .capture(CaptureTap::new(&rfchain, Tap::Phase(&channels)), 16)
+                .capture(CaptureTap::new(rfchain, Tap::Phase(channels.iter().map(|f| f.deref()))), 16)
                 .await
                 .unwrap();
             println!("Phase Snap: {:#?}", phase);
 
             let ddciq = capture
-                .capture(CaptureTap::new(&rfchain, Tap::DDCIQ(&channels)), 16)
+                .capture(CaptureTap::new(rfchain, Tap::DDCIQ(channels.iter().map(|f| f.deref()))), 16)
                 .await
                 .unwrap();
             println!("DDC Snap: {:#?}", ddciq);
@@ -159,16 +168,16 @@ pub async fn mockclient(address: Ipv4Addr, port: u16) -> Result<(), Box<dyn std:
             .await
             .unwrap();
 
-        let config = SweepConfig {
-            freqs: vec![Hertz::new(6_000_000_000, 1), Hertz::new(6_020_000_000, 1)],
-            settings: vec![PowerSetting {
-                attens: Attens { input: 60., output: 60. },
-                fft_scale: 0xfff,
-            }],
-            average: 8192,
-        };
+        // let config = SweepConfig {
+        //     freqs: vec![Hertz::new(6_000_000_000, 1), Hertz::new(6_020_000_000, 1)],
+        //     settings: vec![PowerSetting {
+        //         attens: Attens { input: 60., output: 60. },
+        //         fft_scale: 0xfff,
+        //     }],
+        //     average: 8192,
+        // };
 
-        config.sweep(&capture,  Tap::DDCIQ(&chans_256.iter().collect::<Vec<_>>()), &mut ifboard, &mut dsp_scale, &dactable, None).await.unwrap();
+        // config.sweep(&capture, Tap::DDCIQ(chans_256.iter().map(|f| f.deref())), &mut ifboard, &mut dsp_scale, &dactable, None).await.unwrap();
 
             Ok(())
         })

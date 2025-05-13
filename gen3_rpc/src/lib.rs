@@ -6,8 +6,8 @@ pub mod client;
 pub mod server;
 pub mod utils;
 
+use std::error::Error;
 use std::fmt::Display;
-use std::{error::Error, ops::Shl};
 
 use capnp::traits::{FromPointerBuilder, SetterInput};
 use num::Rational64;
@@ -633,11 +633,13 @@ impl DDCCapabilities {
             .min_by(|x, y| (tone - x.1).abs().cmp(&(tone - y.1).abs()))
             .unwrap();
 
-        (min.0, self.quantize_centered_tone(min.1))
+        let centered = tone - min.1;
+        (min.0, self.quantize_centered_tone(centered))
     }
+
     #[inline]
     pub fn quantize_centered_tone(&self, tone: Hertz) -> i32 {
-        let p = (tone * Hertz::new(1i64.shl(self.freq_bits - 1), 1)).round();
+        let p = (tone / self.freq_resolution).round();
         assert_eq!(*p.denom(), 1);
         *p.numer() as i32
     }
@@ -654,6 +656,14 @@ impl DDCCapabilities {
                         * Hertz::new(1, self.opfb_channels as i64),
                 )
             })
+            .chain((1..self.opfb_channels / 2 + 1).rev().map(|i| {
+                (
+                    i,
+                    -Hertz::new(i as i64, 1)
+                        * self.opfb_samplerate
+                        * Hertz::new(1, self.opfb_channels as i64),
+                )
+            }))
             .collect()
     }
 }

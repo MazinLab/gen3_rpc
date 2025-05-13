@@ -22,6 +22,7 @@ use super::gen3rpc_capnp::snap::snap_avg::Which as SAWhich;
 
 use capnp::{
     capability::FromClientHook,
+    private::capability::ClientHook,
     traits::{FromPointerReader, HasTypeId},
 };
 use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
@@ -31,17 +32,24 @@ use num::Rational64;
 use num_complex::Complex;
 use utils::client::DACCapabilities;
 
-pub struct CaptureTap<'a> {
-    pub rfchain: &'a RFChain<'a>,
-    pub tap: Tap<'a>,
+pub struct CaptureTap<'a, 'b, I>
+where
+    I: Iterator<Item = &'a DDCChannel> + ExactSizeIterator + Clone,
+{
+    pub rfchain: RFChain<'b>,
+    pub tap: Tap<'a, I>,
 }
 
-impl<'a> CaptureTap<'a> {
-    pub fn new(rfchain: &'a RFChain<'a>, tap: Tap<'a>) -> CaptureTap<'a> {
+impl<'a, 'b, I> CaptureTap<'a, 'b, I>
+where
+    I: Iterator<Item = &'a DDCChannel> + ExactSizeIterator + Clone,
+{
+    pub fn new(rfchain: RFChain<'b>, tap: Tap<'a, I>) -> CaptureTap<'a, 'b, I> {
         CaptureTap { rfchain, tap }
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct RFChain<'a> {
     pub dac_table: &'a DACTable,
     pub if_board: &'a IFBoard,
@@ -49,10 +57,13 @@ pub struct RFChain<'a> {
 }
 
 #[derive(Clone)]
-pub enum Tap<'a> {
+pub enum Tap<'a, I>
+where
+    I: Iterator<Item = &'a DDCChannel> + ExactSizeIterator + Clone,
+{
     RawIQ,
-    DDCIQ(&'a [&'a SharedDroppableReference<gen3rpc_capnp::ddc_channel::Client, ()>]),
-    Phase(&'a [&'a SharedDroppableReference<gen3rpc_capnp::ddc_channel::Client, ()>]),
+    DDCIQ(I),
+    Phase(I),
 }
 
 impl<T, E> From<RWhich<T, E>> for Result<T, E> {
@@ -365,6 +376,10 @@ impl DDCChannel {
         request.send().promise.await?;
         Ok(())
     }
+
+    fn client_hook(&self) -> Box<dyn ClientHook> {
+        self.client.clone().into_client_hook()
+    }
 }
 
 impl DDC {
@@ -450,7 +465,14 @@ impl DDC {
 }
 
 impl Capture {
-    pub async fn average(&self, tap: CaptureTap<'_>, length: u64) -> Result<SnapAvg, CaptureError> {
+    pub async fn average<'a, 'b, I>(
+        &self,
+        tap: CaptureTap<'a, 'b, I>,
+        length: u64,
+    ) -> Result<SnapAvg, CaptureError>
+    where
+        I: Iterator<Item = &'a DDCChannel> + ExactSizeIterator + Clone,
+    {
         let mut request = self.client.average_request();
         let mut rtap = request.get().init_tap();
         let mut rfchain = rtap.reborrow().init_rf_chain();
@@ -463,15 +485,17 @@ impl Capture {
                 rtap.set_raw_iq(());
             }
             Tap::DDCIQ(ddcs) => {
-                let mut taps = rtap.init_ddc_iq(ddcs.len() as u32);
-                for (i, ddc) in ddcs.iter().enumerate() {
-                    taps.set(i as u32, ddc.client.client.clone().into_client_hook())
+                let chooks: Vec<_> = ddcs.map(|i| i.client.clone().into_client_hook()).collect();
+                let mut taps = rtap.init_ddc_iq(chooks.len() as u32);
+                for (i, ddc) in chooks.into_iter().enumerate() {
+                    taps.set(i as u32, ddc)
                 }
             }
             Tap::Phase(ddcs) => {
-                let mut taps = rtap.init_phase(ddcs.len() as u32);
-                for (i, ddc) in ddcs.iter().enumerate() {
-                    taps.set(i as u32, ddc.client.client.clone().into_client_hook())
+                let chooks: Vec<_> = ddcs.map(|i| i.client.clone().into_client_hook()).collect();
+                let mut taps = rtap.init_phase(chooks.len() as u32);
+                for (i, ddc) in chooks.into_iter().enumerate() {
+                    taps.set(i as u32, ddc)
                 }
             }
         }
@@ -508,7 +532,14 @@ impl Capture {
         }
     }
 
-    pub async fn capture(&self, tap: CaptureTap<'_>, length: u64) -> Result<Snap, CaptureError> {
+    pub async fn capture<'a, 'b, I>(
+        &self,
+        tap: CaptureTap<'a, 'b, I>,
+        length: u64,
+    ) -> Result<Snap, CaptureError>
+    where
+        I: Iterator<Item = &'a DDCChannel> + ExactSizeIterator + Clone,
+    {
         let mut request = self.client.capture_request();
         let mut rtap = request.get().init_tap();
         let mut rfchain = rtap.reborrow().init_rf_chain();
@@ -516,20 +547,22 @@ impl Capture {
         rfchain.set_if_board(tap.rfchain.if_board.client.clone());
         rfchain.set_dsp_scale(tap.rfchain.dsp_scale.client.clone());
 
-        match tap.tap {
+        match tap.tap.clone() {
             Tap::RawIQ => {
                 rtap.set_raw_iq(());
             }
             Tap::DDCIQ(ddcs) => {
-                let mut taps = rtap.init_ddc_iq(ddcs.len() as u32);
-                for (i, ddc) in ddcs.iter().enumerate() {
-                    taps.set(i as u32, ddc.client.client.clone().into_client_hook())
+                let chooks: Vec<_> = ddcs.map(|i| i.client_hook()).collect();
+                let mut taps = rtap.init_ddc_iq(chooks.len() as u32);
+                for (i, ddc) in chooks.into_iter().enumerate() {
+                    taps.set(i as u32, ddc)
                 }
             }
             Tap::Phase(ddcs) => {
-                let mut taps = rtap.init_phase(ddcs.len() as u32);
-                for (i, ddc) in ddcs.iter().enumerate() {
-                    taps.set(i as u32, ddc.client.client.clone().into_client_hook())
+                let chooks: Vec<_> = ddcs.map(|i| i.client_hook()).collect();
+                let mut taps = rtap.init_phase(chooks.len() as u32);
+                for (i, ddc) in chooks.into_iter().enumerate() {
+                    taps.set(i as u32, ddc)
                 }
             }
         }

@@ -166,11 +166,11 @@ pub mod client {
     use std::sync::mpsc::Sender;
 
     use crate::{
-        client::{self, Capture, CaptureTap, DACTable, DSPScale, IFBoard, RFChain},
+        client::{self, Capture, CaptureTap, DACTable, DDCChannel, DSPScale, IFBoard, RFChain},
         ActualizedDDCChannelConfig, AttenError, Attens, Gen3RpcError, Hertz, SnapAvg,
     };
 
-    use num::{traits::Inv, Complex};
+    use num::{traits::Inv, BigInt, BigRational, Complex};
 
     use rand::prelude::*;
     use rustfft::FftPlanner;
@@ -179,18 +179,21 @@ pub mod client {
         0xFFF, 0xF7F, 0x77F, 0x777, 0x757, 0x755, 0x555, 0x515, 0x115, 0x111, 0x101, 0x001, 0x000,
     ];
 
-    pub async fn agc(
+    pub async fn agc<'a, I>(
         mut output: f32,
         start: f32,
         step: f32,
         dynamic_range: f32,
-        tap: client::Tap<'_>,
+        tap: client::Tap<'a, I>,
         capture: &Capture,
-        dac_table: &DACTable,
-        if_board: &mut IFBoard,
-        dsp_scale: &mut DSPScale,
-    ) -> Result<PowerSetting, Gen3RpcError> {
-        match tap {
+        dac_table: &'a DACTable,
+        if_board: &'a mut IFBoard,
+        dsp_scale: &'a mut DSPScale,
+    ) -> Result<PowerSetting, Gen3RpcError>
+    where
+        I: Iterator<Item = &'a DDCChannel> + ExactSizeIterator + Clone,
+    {
+        match tap.clone() {
             client::Tap::RawIQ => todo!(),
             client::Tap::Phase(_) => todo!(),
             client::Tap::DDCIQ(_) => (),
@@ -218,8 +221,8 @@ pub mod client {
             }
             let snap = capture
                 .capture(
-                    CaptureTap {
-                        rfchain: &RFChain {
+                    CaptureTap::<'a, '_, I> {
+                        rfchain: RFChain {
                             dac_table,
                             if_board,
                             dsp_scale,
@@ -251,7 +254,7 @@ pub mod client {
             let snap = capture
                 .capture(
                     CaptureTap {
-                        rfchain: &RFChain {
+                        rfchain: RFChain {
                             dac_table,
                             if_board,
                             dsp_scale,
@@ -373,18 +376,23 @@ pub mod client {
                     amplitude,
                     phase,
                 } => {
-                    // println!("{} {}", freq, capabilities.bw);
-                    let freq = capabilities.bw / 2 + freq;
-                    if freq > capabilities.bw {
+                    let freq =
+                        BigRational::new(BigInt::from(*freq.numer()), BigInt::from(*freq.denom()));
+                    let bw = BigRational::new(
+                        BigInt::from(*capabilities.bw.numer()),
+                        BigInt::from(*capabilities.bw.denom()),
+                    );
+                    let freq = bw.clone() / BigInt::from(2) + freq;
+                    if freq > bw {
                         return None;
                     }
-                    let freq = freq * (capabilities.length as i64) / capabilities.bw;
+                    let freq: BigRational = freq * (BigInt::from(capabilities.length)) / bw;
                     let freq = freq.floor().reduced();
-                    assert!(*freq.denom() == 1);
-                    let freq = *freq.numer();
-                    assert!(freq >= 0);
+                    assert!(*freq.denom() == 1.into());
+                    let freq = freq.numer().clone();
+                    assert!(freq >= 0.into());
                     Some(QuantizedTone::Single {
-                        freq: freq as usize,
+                        freq: freq.try_into().unwrap(),
                         amplitude,
                         phase,
                     })
@@ -493,13 +501,11 @@ pub mod client {
 
         pub fn build_dynamic_range(&mut self, dynamic_range: f64) -> (f64, Vec<Complex<i16>>) {
             let mut max: f64 = 0.0;
-            println!("{:?}", self.tones);
             let p = self.construct();
             for c in p.iter() {
                 max = max.max(c.re.abs()).max(c.im.abs());
             }
             let gain = dynamic_range * max.inv();
-            println!("{} {}", max, gain);
             (
                 gain,
                 p.into_iter()
@@ -648,29 +654,32 @@ pub mod client {
     }
 
     impl SweepConfig {
-        pub async fn sweep(
+        pub async fn sweep<'a, I>(
             &self,
             capture: &client::Capture,
-            tap: client::Tap<'_>,
-            if_board: &mut client::IFBoard,
-            dsp_scale: &mut client::DSPScale,
-            dac_table: &client::DACTable,
+            tap: client::Tap<'a, I>,
+            if_board: &'a mut client::IFBoard,
+            dsp_scale: &'a mut client::DSPScale,
+            dac_table: &'a client::DACTable,
             channel: Option<Sender<(Hertz, PowerSetting, SnapAvg)>>,
-        ) -> Result<Sweep, Gen3RpcError> {
-            let (mut sweep_result, ddc) = match tap {
+        ) -> Result<Sweep, Gen3RpcError>
+        where
+            I: Iterator<Item = &'a DDCChannel> + ExactSizeIterator + Clone,
+        {
+            let (mut sweep_result, ddc) = match tap.clone() {
                 client::Tap::RawIQ => (
                     SweepResult::RawIQ(Vec::with_capacity(self.settings.len())),
                     vec![],
                 ),
                 client::Tap::DDCIQ(t) => {
-                    let ts = try_join_all(t.iter().map(|f| f.get())).await?;
+                    let ts = try_join_all(t.clone().map(|f| f.get())).await?;
                     (
                         SweepResult::DdcIQ(Vec::with_capacity(self.settings.len())),
                         ts,
                     )
                 }
                 client::Tap::Phase(t) => {
-                    let ts = try_join_all(t.iter().map(|f| f.get())).await?;
+                    let ts = try_join_all(t.clone().map(|f| f.get())).await?;
                     (
                         SweepResult::Phase(Vec::with_capacity(self.settings.len())),
                         ts,
@@ -697,7 +706,7 @@ pub mod client {
                         freqs.push(h);
                     }
                     let ct = CaptureTap {
-                        rfchain: &RFChain {
+                        rfchain: RFChain {
                             dac_table,
                             if_board,
                             dsp_scale,
