@@ -4,659 +4,671 @@
 // Called to in main
 
 // Importing crates/modules
-use crate::status::Status;
-use crate::worker::{RPCCommand, RPCResponse};
-use eframe::{egui, App, CreationContext, NativeOptions};
-use gen3_rpc::utils::client::{PowerSetting, SweepConfig};
-use gen3_rpc::{Attens, Hertz};
-use log::info;
-use num::Complex;
-use std::process::Command;
-use std::sync::mpsc::{Receiver, Sender};
-use std::time::{Duration, SystemTime};
+use crate::worker::{worker_thread, BoardSetup, BoardState, CaptureType, RPCCommand, RPCResponse};
 
-// Defining structs
-pub struct MyApp {
-    current_pane: Pane,
-    command_input: String,
-    command_output: String,
-    status: Status,
-    settings: Settings,
+use eframe::{egui, App, CreationContext, NativeOptions};
+use egui_plot::{AxisHints, HPlacement, Line, Plot, PlotPoints};
+use egui_tiles::Tile;
+use gen3_rpc::{
+    utils::client::{
+        DACBuilder, DACCapabilities, ExactTone, ImpreciseTone, PowerSetting, Quantizable, Sweep,
+        FFT_AGC_OPTIONS,
+    },
+    Attens, DDCCapabilities, DDCChannelConfig, Hertz, Snap,
+};
+use num::Complex;
+
+use std::{
+    net::ToSocketAddrs,
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Arc, RwLock,
+    },
+    thread::{spawn, JoinHandle},
+};
+
+use log::{error, info};
+
+pub struct BoardConnection {
     command: Sender<RPCCommand>,
     response: Receiver<RPCResponse>,
-    error_message: Option<String>,
-    dac_table: Option<Box<[Complex<i16>; 524288]>>,
-    if_freq: Option<Hertz>,
-    if_attens: Option<Attens>,
-    connection_time: Option<SystemTime>,
-    /// Input for the starting frequency
-    sweep_start_freq: String,
-    /// Input for the stopping frequency
-    sweep_stop_freq: String,
-    /// Input for the total number of counts in frequency list
-    sweep_count: String,
-    /// Generated list of frequencies
-    sweep_freqs: Vec<Hertz>,
-    /// Input attenuation (input)
-    sweep_input_atten: String,
-    /// Output attenuation (input)
-    sweep_output_atten: String,
-    /// Input for DSP scale
-    sweep_dsp_scale: String,
-    /// Input for the average value
-    sweep_average: String,
-    /// Display Sweep results (non-functional!!!)
-    sweep_result: Option<String>,
-}
-
-// Defining different panes in the gui
-#[derive(PartialEq, Default)]
-enum Pane {
-    #[default]
-    Settings,
-    Command,
-    Status,
-    DSPScale,
-    DACTable,
-    IFBoard,
-    Sweep,
+    state: Arc<RwLock<BoardState>>,
+    worker_thread: JoinHandle<()>,
+    connection_id: String,
+    dac_capabilities: DACCapabilities,
+    ddc_capabilities: DDCCapabilities,
 }
 
 #[derive(Default)]
-struct Settings {
-    fft_scale: String,       // Use String to handle text input
-    if_freq: String,         // Use String to handle IF frequency input
-    if_input_atten: String,  // Use String to handle IF input attenuation
-    if_output_atten: String, // Use String to handle IF output attenuation
-    if_freq_mode: String,    // Use String to handle IF frequency input (Manual or Board)
-    dsp_scale_mode: String,  // Use String to handle DSP scale input (Manual or Board)
-    if_atten_mode: String,   // Use String to handle IF attenuation input (Manual or Board)
+struct BoardConnectionUIData {
+    latest_capture: Option<Snap>,
+    latest_sweep: Option<Sweep>,
+    waiting_capture: bool,
+    waiting_sweep: bool,
+    capture_count: usize,
+    setup: SetupUIData,
+    snapdata: SnapUIData,
 }
 
-// Defining each gui pane/clickable functionality
-impl App for MyApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if let Ok(c) = self.response.try_recv() {
-            match c {
-                // Handle the CaptureResult response
-                RPCResponse::CaptureResult(data) => {
-                    if data.is_empty() {
-                        self.error_message = Some("Capture failed: No data available.".to_string());
-                    } else {
-                        self.sweep_result = Some(format!("Captured Data: {:?}", data));
+struct SetupUIData {
+    output_atten: f64,
+    input_atten: f64,
+    fft_scale: u16,
+    agc: bool,
+
+    start: f64,
+    stop: f64,
+    count: usize,
+    dynamic_range: f64,
+    db: DACBuilder,
+}
+
+impl Default for SetupUIData {
+    fn default() -> Self {
+        SetupUIData {
+            output_atten: 63.5,
+            input_atten: 63.5,
+            fft_scale: 0xfff,
+            agc: true,
+
+            start: -128.,
+            stop: 128.,
+            count: 128,
+            dynamic_range: 0.75,
+            db: DACBuilder::new(DACCapabilities {
+                bw: Hertz::new(4_096_000_000, 1),
+                length: 1 << 19,
+            }),
+        }
+    }
+}
+
+trait UIAble {
+    type UIData;
+    fn ui(&mut self, data: &mut Self::UIData, ui: &mut egui::Ui);
+}
+
+#[derive(Default)]
+struct SnapUIData {
+    ddc_channel: usize,
+    show_phase: bool,
+}
+
+impl UIAble for Snap {
+    type UIData = SnapUIData;
+    fn ui(&mut self, data: &mut Self::UIData, ui: &mut egui::Ui) {
+        match self {
+            Self::Raw(iq) => {
+                let real_points: PlotPoints =
+                    (0..iq.len()).map(|i| [i as f64, iq[i].re as f64]).collect();
+                let imag_points: PlotPoints =
+                    (0..iq.len()).map(|i| [i as f64, iq[i].im as f64]).collect();
+
+                let real = Line::new("real", real_points);
+                let imag = Line::new("imag", imag_points);
+                Plot::new(format!("RawIQ{}", iq.len()))
+                    .width(ui.available_width())
+                    .height(ui.available_width() / 2.)
+                    .show(ui, |ui| {
+                        ui.line(real);
+                        ui.line(imag);
+                    });
+            }
+            Self::DdcIQ(iqs) => {
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Slider::new(&mut data.ddc_channel, 0..=(iqs.len() - 1))
+                            .text("Channel"),
+                    );
+                    ui.checkbox(&mut data.show_phase, "Computed Phase");
+                });
+                let real_points: PlotPoints = (0..iqs[data.ddc_channel].len())
+                    .map(|i| [i as f64, iqs[data.ddc_channel][i].re as f64])
+                    .collect();
+                let imag_points: PlotPoints = (0..iqs[data.ddc_channel].len())
+                    .map(|i| [i as f64, iqs[data.ddc_channel][i].im as f64])
+                    .collect();
+
+                let range = iqs[data.ddc_channel]
+                    .iter()
+                    .map(|c| c.re.abs().max(c.im.abs()).max(1))
+                    .max()
+                    .unwrap_or(1) as f64;
+
+                let real = Line::new("real", real_points);
+                let imag = Line::new("imag", imag_points);
+                Plot::new(format!(
+                    "DDCIQ{}-{}",
+                    iqs.len(),
+                    iqs[data.ddc_channel].len()
+                ))
+                .width(ui.available_width())
+                .height(ui.available_width() / 2.)
+                .default_y_bounds(-range * 1.1, range * 1.1)
+                .custom_y_axes(if data.show_phase {
+                    vec![
+                        AxisHints::new_y(),
+                        AxisHints::new_y()
+                            .label("Degrees")
+                            .placement(HPlacement::Right)
+                            .formatter(|a, _b| format!("{:3.0}", a.value * 180. / range)),
+                    ]
+                } else {
+                    vec![AxisHints::new_y()]
+                })
+                .show(ui, |ui| {
+                    ui.line(real);
+                    ui.line(imag);
+
+                    if data.show_phase {
+                        let phase_points: PlotPoints = (0..iqs[data.ddc_channel].len())
+                            .map(|i| {
+                                let c = iqs[data.ddc_channel][i];
+                                let c = Complex::new(c.re as f64, c.im as f64);
+                                [i as f64, c.to_polar().1 * range / (std::f64::consts::PI)]
+                            })
+                            .collect();
+                        let phase = Line::new("phase", phase_points);
+                        ui.line(phase);
+                    }
+                });
+            }
+            Self::Phase(ps) => {
+                ui.add(
+                    egui::Slider::new(&mut data.ddc_channel, 0..=(ps.len() - 1)).text("Channel"),
+                );
+                let phase_points: PlotPoints = (0..ps[data.ddc_channel].len())
+                    .map(|i| [i as f64, ps[data.ddc_channel][i] as f64])
+                    .collect();
+                let phase = Line::new("phase", phase_points);
+                Plot::new(format!("Phase{}-{}", ps.len(), ps[data.ddc_channel].len()))
+                    .width(ui.available_width())
+                    .height(ui.available_width() / 2.)
+                    .show(ui, |ui| {
+                        ui.line(phase);
+                    });
+            }
+        }
+    }
+}
+
+impl BoardConnection {
+    fn snap_callback(&mut self, data: &mut BoardConnectionUIData, snap: Snap) -> Option<Pane> {
+        data.latest_capture = Some(snap);
+        data.waiting_capture = false;
+        None
+    }
+
+    fn sweep_callback(&mut self, data: &mut BoardConnectionUIData, sweep: Sweep) {
+        data.latest_sweep = Some(sweep);
+        data.waiting_sweep = false;
+    }
+
+    fn setup_callback(&mut self, _data: &mut BoardConnectionUIData) {}
+}
+
+impl UIAble for BoardConnection {
+    type UIData = BoardConnectionUIData;
+
+    fn ui(&mut self, data: &mut Self::UIData, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                // Compiler should optimize out this clone :fingers_crossed:
+                let s = self.state.read().unwrap().clone();
+                ui.set_width(ui.available_width() / 4.);
+                // ui.set_height(ui.available_height());
+                match s {
+                    BoardState::Moving => {
+                        ui.heading("Board Moving");
+                        ui.separator();
+                    }
+                    BoardState::Operating(bsi) => {
+                        ui.heading("Board Operating");
+                        ui.separator();
+                        egui::Grid::new("board_status")
+                            .num_columns(2)
+                            .striped(true)
+                            .spacing([40., 2.])
+                            .show(ui, |ui| {
+                                ui.label("LO Freq");
+                                let re = ui.label(format!(
+                                    "{:.5} MHz",
+                                    (*bsi.lo.numer() as f64)
+                                        / (*bsi.lo.denom() as f64 * 1000. * 1000.)
+                                ));
+                                re.on_hover_text(format!(
+                                    "{} Hz / {}",
+                                    bsi.lo.numer(),
+                                    bsi.lo.denom()
+                                ));
+                                ui.end_row();
+
+                                ui.label("Input Atten");
+                                ui.label(format!("{:.2} dB", bsi.power_setting.attens.input));
+                                ui.end_row();
+
+                                ui.label("Output Atten");
+                                ui.label(format!("{:.2} dB", bsi.power_setting.attens.output));
+                                ui.end_row();
+
+                                ui.label("FFT Scale");
+                                ui.label(format!(
+                                    "/2^{} ({:3x})",
+                                    bsi.power_setting.fft_scale.count_ones(),
+                                    bsi.power_setting.fft_scale,
+                                ));
+                            });
                     }
                 }
-                // Update the FFT scale in the settings
-                RPCResponse::FFTScale(i) => {
-                    self.settings.fft_scale = i.map_or_else(|| "0".to_string(), |v| v.to_string());
-                }
-                // Update the DAC table
-                RPCResponse::DACTable(d) => {
-                    self.dac_table = d;
-                }
-                // Update the IF frequency
-                RPCResponse::IFFreq(f) => {
-                    self.if_freq = f;
-                }
-                // Update the attenuation
-                RPCResponse::IFAttens(a) => {
-                    self.if_attens = a;
-                }
-                // Update the connection status
-                RPCResponse::Connected(time) => {
-                    self.status.update("Connected");
-                    self.connection_time = Some(time);
-                }
-                RPCResponse::Sweep(sweep) => {
-                    self.sweep_result = Some(format!("{:?}", sweep));
-                }
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                // ui.set_height(ui.available_height());
+                ui.collapsing("Capture", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut data.capture_count).speed(64));
+                        if ui.button("Raw IQ").clicked() {
+                            self.command
+                                .send(RPCCommand::PerformCapture(
+                                    data.capture_count,
+                                    CaptureType::RawIQ,
+                                ))
+                                .unwrap();
+                            data.waiting_capture = true;
+                        }
+                        ui.add_enabled_ui(
+                            if let BoardState::Operating(bsi) = self.state.read().unwrap().clone() {
+                                !bsi.ddc_config.is_empty()
+                            } else {
+                                false
+                            },
+                            |ui| {
+                                if ui.button("DDC IQ").clicked() {
+                                    self.command
+                                        .send(RPCCommand::PerformCapture(
+                                            data.capture_count,
+                                            CaptureType::DDCIQ,
+                                        ))
+                                        .unwrap();
+                                    data.waiting_capture = true;
+                                }
+                                if ui.button("Phase").clicked() {
+                                    self.command
+                                        .send(RPCCommand::PerformCapture(
+                                            data.capture_count,
+                                            CaptureType::Phase,
+                                        ))
+                                        .unwrap();
+                                    data.waiting_capture = true;
+                                }
+                            },
+                        );
+                        if data.waiting_capture {
+                            ui.spinner();
+                        }
+                    });
+                    if let Some(snap) = &mut data.latest_capture {
+                        snap.ui(&mut data.snapdata, ui);
+                    }
+                });
+                ui.collapsing("Setup", |ui| {
+                    if ui.button("Load").clicked() {
+                        let ddc_config = data
+                            .setup
+                            .db
+                            .tones
+                            .clone()
+                            .into_iter()
+                            .map(|t| -> DDCChannelConfig {
+                                let exact = t.to_exact(&self.dac_capabilities);
+                                match exact {
+                                    ExactTone::Single {
+                                        freq,
+                                        amplitude: _,
+                                        phase: _,
+                                    } => {
+                                        let (bin, freq) = self.ddc_capabilities.ddc_freq(freq);
+                                        DDCChannelConfig {
+                                            source_bin: bin,
+                                            ddc_freq: freq,
+                                            dest_bin: None,
+                                            rotation: 0,
+                                            center: Complex::new(0, 0),
+                                        }
+                                    }
+                                }
+                            })
+                            .collect();
+                        self.command
+                            .send(RPCCommand::LoadSetup(BoardSetup {
+                                lo: Hertz::new(6_000_000_000, 1),
+                                power_setting: PowerSetting {
+                                    attens: Attens {
+                                        input: data.setup.input_atten as f32,
+                                        output: data.setup.output_atten as f32,
+                                    },
+                                    fft_scale: data.setup.fft_scale,
+                                },
+                                dac_table: data
+                                    .setup
+                                    .db
+                                    .build_dynamic_range(data.setup.dynamic_range)
+                                    .1,
+                                ddc_config,
+                            }))
+                            .unwrap();
+                    }
+
+                    ui.heading("DAC Table");
+                    let mut rebuild = data.setup.db.tones.len() != data.setup.count;
+                    egui::Grid::new("dsettings")
+                        .num_columns(2)
+                        .spacing([40., 2.])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.label("Start");
+                            rebuild |= ui
+                                .add(
+                                    egui::DragValue::new(&mut data.setup.start)
+                                        .range(-2048f64..=data.setup.stop),
+                                )
+                                .changed();
+                            ui.end_row();
+
+                            ui.label("Stop");
+                            rebuild |= ui
+                                .add(
+                                    egui::DragValue::new(&mut data.setup.stop)
+                                        .range(data.setup.start..=2048f64),
+                                )
+                                .changed();
+                            ui.end_row();
+
+                            ui.label("Count");
+                            rebuild |= ui
+                                .add(egui::DragValue::new(&mut data.setup.count).range(2..=2048))
+                                .changed();
+                        });
+                    if rebuild {
+                        data.setup.db = DACBuilder::new(self.dac_capabilities)
+                            .add_tones((0..data.setup.count).map(|i| {
+                                let freq = (data.setup.start
+                                    + (i as f64) * (data.setup.stop - data.setup.start)
+                                        / (data.setup.count as f64))
+                                    * 1e6;
+                                let t = ImpreciseTone::Single {
+                                    freq,
+                                    amplitude: 1.0,
+                                    phase: 0.0,
+                                };
+                                t.quantize(&data.setup.db.capabilities).unwrap()
+                            }))
+                            .randomize_phases();
+                    }
+                    ui.separator();
+                    ui.heading("Power Settings");
+                    egui::Grid::new("psettings")
+                        .num_columns(2)
+                        .spacing([40., 2.])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.label("Output Atten");
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::DragValue::new(&mut data.setup.output_atten)
+                                        .range(0f64..=63.5)
+                                        .speed(0.25)
+                                        .min_decimals(2)
+                                        .max_decimals(2),
+                                );
+                                ui.checkbox(&mut data.setup.agc, "AGC");
+                            });
+                            ui.end_row();
+                            if data.setup.agc {
+                                ui.disable();
+                            }
+
+                            ui.label("FFT Scale");
+                            egui::ComboBox::new("fftscale", "")
+                                .selected_text(format!(
+                                    "/2^{} ({:3x})",
+                                    data.setup.fft_scale.count_ones(),
+                                    data.setup.fft_scale
+                                ))
+                                .show_ui(ui, |ui| {
+                                    for agc in FFT_AGC_OPTIONS {
+                                        ui.selectable_value(
+                                            &mut data.setup.fft_scale,
+                                            agc,
+                                            format!("/2^{} ({:3x})", agc.count_ones(), agc),
+                                        );
+                                    }
+                                });
+                            ui.end_row();
+
+                            ui.label("Input Atten");
+                            ui.add(
+                                egui::DragValue::new(&mut data.setup.input_atten)
+                                    .range(0f64..=63.5)
+                                    .speed(0.25)
+                                    .min_decimals(2)
+                                    .max_decimals(2),
+                            );
+                        });
+                });
+            });
+        });
+    }
+}
+
+enum Pane {
+    Board(BoardConnection, BoardConnectionUIData),
+    SweepSetup(Sweep, ()),
+}
+
+type PendingConnection = (
+    Sender<RPCCommand>,
+    Receiver<RPCResponse>,
+    JoinHandle<()>,
+    String,
+);
+
+// Defining structs
+pub struct ReadingRainbow {
+    connection_string: String,
+    pending_connections: Vec<PendingConnection>,
+    tree: egui_tiles::Tree<Pane>,
+    tree_behavior: TreeBehavior,
+}
+
+impl ReadingRainbow {
+    fn connect(&mut self, addr: String) {
+        let (cmd_sender, cmd_receiver) = channel();
+        let (rsp_sender, rsp_receiver) = channel();
+        let ba = addr.clone();
+        let worker = spawn(move || {
+            worker_thread(ba, cmd_receiver, rsp_sender).unwrap();
+        });
+        self.pending_connections
+            .push((cmd_sender, rsp_receiver, worker, addr));
+    }
+}
+
+// pub struct SweepSetup {
+//     output_min: f64,
+//     output_max: f64,
+//     output_step: f64,
+//     bandwidth: f64,
+//     step: f64,
+//     lo_center: f64,
+// }
+
+// Defining each gui pane/clickable functionality
+impl App for ReadingRainbow {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut pops = Vec::new();
+        for (i, connection) in self.pending_connections.iter().enumerate().rev() {
+            if let Ok(RPCResponse::Connected(bs, dacc, ddcc)) = connection.1.try_recv() {
+                pops.push((i, (bs, dacc, ddcc)));
             }
         }
 
-        egui::SidePanel::left("side_panel").show(ctx, |ui| {
-            ui.heading("Menu");
+        for pop in pops {
+            let b = self.pending_connections.remove(pop.0);
+            let bc = BoardConnection {
+                command: b.0,
+                response: b.1,
+                state: pop.1 .0,
+                worker_thread: b.2,
+                connection_id: b.3,
+                dac_capabilities: pop.1 .1,
+                ddc_capabilities: pop.1 .2,
+            };
+            info!(
+                "Attempting to add {} {:?}",
+                bc.connection_id.clone(),
+                self.tree.root
+            );
+            let id = self.tree.tiles.insert_new(Tile::Pane(Pane::Board(
+                bc,
+                BoardConnectionUIData {
+                    setup: SetupUIData {
+                        db: DACBuilder::new(pop.1 .1),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )));
+            let c = self.tree.tiles.get_mut(self.tree.root.unwrap()).unwrap();
+            match c {
+                Tile::Container(c) => c.add_child(id),
+                _ => unreachable!(),
+            }
+        }
 
-            if ui.button("Settings").clicked() {
-                self.current_pane = Pane::Settings;
+        for (_id, t) in self.tree.tiles.iter_mut() {
+            match t {
+                Tile::Pane(p) => {
+                    if let Pane::Board(bc, data) = p {
+                        let resp = bc.response.try_recv();
+                        match resp {
+                            Ok(RPCResponse::Connected(..)) => unreachable!(),
+                            Ok(RPCResponse::CaptureResult(snap)) => {
+                                bc.snap_callback(data, snap);
+                            }
+                            Ok(RPCResponse::Sweep(sweep)) => {
+                                bc.sweep_callback(data, sweep);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Tile::Container(_) => {}
             }
-            if ui.button("Command Line").clicked() {
-                self.current_pane = Pane::Command;
-            }
-            if ui.button("Status").clicked() {
-                self.current_pane = Pane::Status;
-            }
-            if ui.button("DSP Scale Adjustment").clicked() {
-                self.current_pane = Pane::DSPScale;
-            }
-            if ui.button("DAC Table").clicked() {
-                self.current_pane = Pane::DACTable;
-            }
-            if ui.button("IF Board").clicked() {
-                self.current_pane = Pane::IFBoard;
-            }
-            if ui.button("Sweep").clicked() {
-                self.current_pane = Pane::Sweep;
-            }
-        });
+        }
 
-        // Showing the central pane selected
-        egui::CentralPanel::default().show(ctx, |ui| {
-            match self.current_pane {
-                Pane::Settings => {
-                    ui.heading("Settings");
-
-                    // Display connection status and timestamp
-                    if let Some(connection_time) = self.connection_time {
-                        let duration = connection_time.elapsed().unwrap_or(Duration::new(0, 0));
-                        ui.label("Successfully connected to server");
-                        ui.label(format!("Connection duration: {:.2?}", duration));
+        egui::SidePanel::left("Status").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let te = egui::TextEdit::singleline(&mut self.connection_string)
+                    .hint_text("Enter a board address");
+                let re = te.show(ui).response;
+                let button = ui.button("Connect");
+                if button.clicked()
+                    || (re.lost_focus() && ui.input(|r| r.key_pressed(egui::Key::Enter)))
+                {
+                    if let Ok(sa) = self.connection_string.to_socket_addrs() {
+                        info!("Connecting to {:?}", sa);
+                        self.connect(self.connection_string.clone());
                     } else {
-                        ui.label("Not connected to server");
-                    }
-                }
-                Pane::Command => {
-                    ui.heading("Command Line");
-
-                    // Input command line text
-                    ui.horizontal(|ui| {
-                        ui.label("Command:");
-                        ui.text_edit_singleline(&mut self.command_input);
-                        if ui.button("Run").clicked() {
-                            self.command_output = run_command(&self.command_input);
-                        }
-                    });
-
-                    // Show command line output
-                    ui.label("Output:");
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.command_output)
-                            .desired_width(f32::INFINITY) // Make the output box fill the pane width
-                            .desired_rows(10), // Number of output rows (can adjust)
-                    );
-                }
-                Pane::Status => {
-                    ui.heading("Status");
-                    ui.label(&self.status.status_message);
-                }
-                Pane::DSPScale => {
-                    ui.heading("DSP Scale");
-
-                    // Button to request the current DSP scale
-                    if ui.button("Get DSP Scale").clicked() {
-                        self.command.send(RPCCommand::GetFFTScale).unwrap();
-                    }
-
-                    // Display the current DSP scale if available
-                    ui.label(format!("DSP Scale: {}", self.settings.fft_scale));
-
-                    // Text input for adjusting scale
-                    ui.horizontal(|ui| {
-                        ui.label("DSP Scale:");
-                        ui.text_edit_singleline(&mut self.settings.fft_scale);
-                    });
-
-                    // Display valid range and example values
-                    ui.label("Valid values: 4095, 3967, 1919, 1911, 1879, 1877, 1365, 1301, 277, 273, 257, 1, 0");
-
-                    // Button to apply scale
-                    if ui.button("Apply Scale").clicked() {
-                        let valid_values = [4095, 3967, 1919, 1911, 1879, 1877, 1365, 1301, 277, 273, 257, 1, 0];
-                        if let Ok(scale_value) = self.settings.fft_scale.parse::<u16>() {
-                            // Only pass the value to the worker.rs if it is within the accepted values
-                            if valid_values.contains(&scale_value) {
-                                if let Err(e) = set_scale(&self.command, scale_value) {
-                                    self.error_message = Some(format!("Failed to set scale: {}", e));
-                                } else {
-                                    self.error_message = None; // Clear the error message on success
-                                }
-                            } else {
-                                // Display an error message if the value is not valid
-                                self.error_message = Some("Invalid scale value. Please enter one of the valid values.".to_string());
-                            }
+                        let mut content = self.connection_string.clone();
+                        content.push_str(":4242");
+                        if let Ok(sa) = content.to_socket_addrs() {
+                            info!("Connecting to {:?}", sa);
+                            self.connect(content);
                         } else {
-                            // Error if input is not a valid number
-                            self.error_message = Some("Invalid scale value. Please enter one of the valid values.".to_string());
+                            error!("Unable to parse address {}", content);
                         }
-                    }
-
-                    // Display possible error
-                    if let Some(ref error_message) = self.error_message {
-                        ui.label(error_message);
                     }
                 }
-                Pane::DACTable => {
-                    ui.heading("DAC Table");
-
-                    // Button to request the current DAC table
-                    if ui.button("Get DAC Table").clicked() {
-                        self.command.send(RPCCommand::GetDACTable).unwrap();
-                    }
-
-                    // Display the current DAC table if available (non-fully functional)
-                    // Possible memory issue with large table of complex values 
-                    if let Some(ref dac_table) = self.dac_table {
-                        ui.label(format!("DAC Table: {:?}", &dac_table[..16]));
-                    }
-
-                    // Text input for setting DAC table
-                    ui.horizontal(|ui| {
-                        ui.label("DAC Table:");
-                        ui.text_edit_singleline(&mut self.settings.fft_scale); // Use a different field for DAC table input
-                    });
-
-                    // Button to set the DAC table
-                    if ui.button("Set DAC Table").clicked() {
-                        // PArse input and set DAC table
-                        let data: Box<[Complex<i16>; 524288]> = Box::new([Complex::new(0, 0); 524288]); // Replace with actual user input parsing
-                        if let Err(e) = set_dac_table(&self.command, data) {
-                            self.error_message = Some(format!("Failed to set DAC table: {}", e));
-                        } else {
-                            self.error_message = None; // Clear the error message on success
-                        }
-                    }
-
-                    // Display the error message if it exists
-                    if let Some(ref error_message) = self.error_message {
-                        ui.label(error_message);
-                    }
-                }
-                Pane::IFBoard => {
-                    ui.heading("IF Board");
-
-                    // Button to request the current IF frequency
-                    if ui.button("Get IF Frequency").clicked() {
-                        self.command.send(RPCCommand::GetIFFreq).unwrap();
-                    }
-
-                    // Display the current IF frequency if available
-                    if let Some(ref if_freq) = self.if_freq {
-                        ui.label(format!("Current IF Frequency: {}/{}", if_freq.numer(), if_freq.denom()));
-                    }
-
-                    // Text input for setting IF frequency
-                    ui.horizontal(|ui| {
-                        ui.label("IF Frequency:");
-                        ui.text_edit_singleline(&mut self.settings.if_freq);
-                    });
-
-                    // Button to set the IF frequency
-                    if ui.button("Set IF Frequency").clicked() {
-                        // Parse user input and set the IF frequency
-                        let parts: Vec<&str> = self.settings.if_freq.split('/').collect();
-                        if parts.len() == 2 {
-                            if let (Ok(numer), Ok(denom)) = (parts[0].parse::<i64>(), parts[1].parse::<i64>()) {
-                                let freq = Hertz::new(numer, denom);
-                                if let Err(e) = set_if_freq(&self.command, freq) {
-                                    self.error_message = Some(format!("Failed to set IF frequency: {}", e));
-                                } else {
-                                    self.error_message = None; // Clear the error message on success
-                                }
-                            } else {
-                                self.error_message = Some("Invalid IF frequency. Enter valid numerator/denominator.".to_string());
-                            }
-                        } else {
-                            self.error_message = Some("Invalid IF frequency format. Use the format numerator/denominator.".to_string());
-                        }
-                    }
-
-                    // Button to request the current IF attenuations
-                    if ui.button("Get IF Attenuation").clicked() {
-                        self.command.send(RPCCommand::GetIFAttens).unwrap();
-                    }
-
-                    // Display the current IF attenuations if available
-                    if let Some(ref if_attens) = self.if_attens {
-                        ui.label(format!("Current IF Attenuation - Input: {}, Output: {}", if_attens.input, if_attens.output));
-                    }
-
-                    // Text input for setting IF attenuations
-                    ui.horizontal(|ui| {
-                        ui.label("IF Input Attenuation:");
-                        ui.text_edit_singleline(&mut self.settings.if_input_atten);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("IF Output Attenuation:");
-                        ui.text_edit_singleline(&mut self.settings.if_output_atten);
-                    });
-
-                    // Button to set the IF attenuations
-                    if ui.button("Set IF Attenuation").clicked() {
-                        // Parse the user input and set the IF attenuations
-                        if let (Ok(input), Ok(output)) = (self.settings.if_input_atten.parse::<i32>(), self.settings.if_output_atten.parse::<i32>()) {
-                            let attens = Attens {
-                                input: input as f32,
-                                output: output as f32,
-                            };
-                            if let Err(e) = set_if_attens(&self.command, attens) {
-                                self.error_message = Some(format!("Failed to set IF attenuation: {}", e));
-                            } else {
-                                self.error_message = None; // Clear the error message on success
-                            }
-                        } else {
-                            self.error_message = Some("Invalid IF attenuations. Enter valid input and output attenuations.".to_string());
-                        }
-                    }
-
-                    // Display the error message if it exists
-                    if let Some(ref error_message) = self.error_message {
-                        ui.label(error_message);
-                    }
-                }
-                Pane::Sweep => {
-                    ui.heading("Sweep Configuration");
-
-                    // Frequency Settings
-                    ui.group(|ui| {
-                        ui.heading("Frequency Settings");
-
-                        // Option to choose between manual input or fetching frequency from the board
-                        ui.horizontal(|ui| {
-                            ui.label("Initial Frequency:");
-                            if ui.radio_value(&mut self.settings.if_freq_mode, "Manual".to_string(), "Manual").clicked() {
-                                self.settings.if_freq_mode = "Manual".to_string();
-                            }
-                            if ui.radio_value(&mut self.settings.if_freq_mode, "Board".to_string(), "Board").clicked() {
-                                self.settings.if_freq_mode = "Board".to_string();
-                            }
-                        });
-
-                        // Handle manual input or fetching frequency from the board
-                        if self.settings.if_freq_mode == "Manual" {
-                            ui.horizontal(|ui| {
-                                ui.label("Start Frequency (e.g., 6000000000):");
-                                ui.text_edit_singleline(&mut self.sweep_start_freq);
-                            });
-                        } else if self.settings.if_freq_mode == "Board" {
-                            if ui.button("Get Frequency from Board").clicked() {
-                                self.command.send(RPCCommand::GetIFFreq).unwrap();
-                            }
-
-                            if let Some(ref if_freq) = self.if_freq {
-                                ui.label(format!("Initial Frequency (from board): {}/{}", if_freq.numer(), if_freq.denom()));
-                            } else {
-                                ui.label("Initial Frequency not available.");
-                            }
-                        }
-
-                        // Show stopping frequency and number of counts
-                        if self.settings.if_freq_mode == "Manual" || self.settings.if_freq_mode == "Board" {
-                            ui.horizontal(|ui| {
-                                ui.label("Stopping Frequency (e.g., 6020000000):");
-                                ui.text_edit_singleline(&mut self.sweep_stop_freq);
-                            });
-
-                            ui.horizontal(|ui| {
-                                ui.label("Number of Frequency Values:");
-                                ui.text_edit_singleline(&mut self.sweep_count);
-                            });
-
-                            // Button to generate frequencies
-                            if ui.button("Generate Frequency List").clicked() {
-                                let start_freq = if self.settings.if_freq_mode == "Manual" {
-                                    self.sweep_start_freq.parse::<i64>().ok()
-                                } else {
-                                    self.if_freq.as_ref().map(|f| f.numer()).cloned()
-                                };
-
-                                if let (Some(start), Ok(stop), Ok(count)) = (
-                                    start_freq,
-                                    self.sweep_stop_freq.parse::<i64>(),
-                                    self.sweep_count.parse::<usize>(),
-                                ) {
-                                    if count > 1 && start < stop {
-                                        self.sweep_freqs = (0..count)
-                                            .map(|i| {
-                                                let freq = start + i as i64 * (stop - start) / (count as i64 - 1);
-                                                Hertz::new(freq, 1)
-                                            })
-                                            .collect();
-                                        self.error_message = None; // Clear any previous error messages
-                                    } else {
-                                        self.error_message = Some("Invalid input: Count must be > 1 and initial frequency < stopping frequency.".to_string());
-                                    }
-                                } else {
-                                    self.error_message = Some("Invalid input: Enter valid numbers for initial/stopping frequency and count.".to_string());
-                                }
-                            }
-
-                            // Display the generated frequencies
-                            if !self.sweep_freqs.is_empty() {
-                                ui.label("Generated Frequency List:");
-                                for freq in &self.sweep_freqs {
-                                    ui.label(format!("{}/{}", freq.numer(), freq.denom()));
-                                }
-                            }
-                        }
-                    });
-
-                    // Power Settings
-                    ui.group(|ui| {
-                        ui.heading("Power Settings");
-
-                        // Option to choose between manual input or fetching attenuations from the board
-                        ui.horizontal(|ui| {
-                            ui.label("Attenuations:");
-                            if ui.radio_value(&mut self.settings.if_atten_mode, "Manual".to_string(), "Manual").clicked() {
-                                self.settings.if_atten_mode = "Manual".to_string();
-                            }
-                            if ui.radio_value(&mut self.settings.if_atten_mode, "Board".to_string(), "Board").clicked() {
-                                self.settings.if_atten_mode = "Board".to_string();
-                            }
-                        });
-
-                        // Handle manual input or fetching attenuations from the board
-                        if self.settings.if_atten_mode == "Manual" {
-                            ui.horizontal(|ui| {
-                                ui.label("Input Attenuation:");
-                                ui.text_edit_singleline(&mut self.sweep_input_atten);
-                            });
-
-                            ui.horizontal(|ui| {
-                                ui.label("Output Attenuation:");
-                                ui.text_edit_singleline(&mut self.sweep_output_atten);
-                            });
-                        } else if self.settings.if_atten_mode == "Board" {
-                            if ui.button("Get IF Attenuations from Board").clicked() {
-                                self.command.send(RPCCommand::GetIFAttens).unwrap();
-                            }
-
-                            if let Some(ref if_attens) = self.if_attens {
-                                ui.label(format!(
-                                    "Current IF Attenuations - Input: {}, Output: {}",
-                                    if_attens.input, if_attens.output
-                                ));
-                            } else {
-                                ui.label("Attenuation not available.");
-                            }
-                        }
-
-                        // Input for DSP scale
-                        ui.horizontal(|ui| {
-                            ui.label("DSP Scale:");
-                            if ui.radio_value(&mut self.settings.dsp_scale_mode, "Manual".to_string(), "Manual").clicked() {
-                                self.settings.dsp_scale_mode = "Manual".to_string();
-                            }
-                            if ui.radio_value(&mut self.settings.dsp_scale_mode, "Board".to_string(), "Board").clicked() {
-                                self.settings.dsp_scale_mode = "Board".to_string();
-                            }
-                        });
-
-                        if self.settings.dsp_scale_mode == "Manual" {
-                            ui.horizontal(|ui| {
-                                ui.label("Enter DSP Scale:");
-                                ui.text_edit_singleline(&mut self.sweep_dsp_scale);
-                            });
-                        } else if self.settings.dsp_scale_mode == "Board" {
-                            if ui.button("Get DSP Scale from Board").clicked() {
-                                self.command.send(RPCCommand::GetFFTScale).unwrap();
-                            }
-
-                            ui.label(format!("Current DSP Scale: {}", self.settings.fft_scale));
-                        }
-                    });
-
-                    // Time Average
-                    ui.group(|ui| {
-                        ui.heading("Time Average");
-
-                        ui.horizontal(|ui| {
-                            ui.label("Average:");
-                            ui.text_edit_singleline(&mut self.sweep_average);
-                        });
-
-                        // Button to perform the sweep
-                        if ui.button("Perform Sweep").clicked() {
-                            let dsp_scale = if self.settings.dsp_scale_mode == "Manual" {
-                                self.sweep_dsp_scale.parse::<u16>().ok()
-                            } else {
-                                self.settings.fft_scale.parse::<u16>().ok()
-                            };
-
-                            let input_atten = if self.settings.if_atten_mode == "Manual" {
-                                self.sweep_input_atten.parse::<f32>().ok()
-                            } else {
-                                self.if_attens.as_ref().map(|a| a.input)
-                            };
-
-                            let output_atten = if self.settings.if_atten_mode == "Manual" {
-                                self.sweep_output_atten.parse::<f32>().ok()
-                            } else {
-                                self.if_attens.as_ref().map(|a| a.output)
-                            };
-
-                            if let (Some(input_atten), Some(output_atten), Ok(average), Some(fft_scale)) = (
-                                input_atten,
-                                output_atten,
-                                self.sweep_average.parse::<u64>(),
-                                dsp_scale,
-                            ) {
-                                let settings = vec![PowerSetting {
-                                    attens: Attens {
-                                        input: input_atten,
-                                        output: output_atten,
-                                    },
-                                    fft_scale,
-                                }];
-
-                                let config = SweepConfig {
-                                    freqs: self.sweep_freqs.clone(),
-                                    settings,
-                                    average,
-                                };
-
-                                self.command.send(RPCCommand::SweepConfig(config)).unwrap();
-                            } else {
-                                self.error_message = Some("Invalid input values.".to_string());
-                            }
-                        }
-
-                        // Button to perform a capture 
-                        // Non-functional (yields error)
-                        if ui.button("Capture").clicked() {
-                            self.command.send(RPCCommand::PerformCapture).unwrap();
-                        }
-                    });
-
-                    // Display error message
-                    if let Some(ref error_message) = self.error_message {
-                        ui.label(error_message);
-                    }
-
-                    // Display the sweep result
-                    if let Some(ref sweep_result) = self.sweep_result {
-                        ui.label(sweep_result);
-                    }
-                }
-            }
+            });
+        });
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.set_height(ui.available_height());
+            self.tree.ui(&mut self.tree_behavior, ui);
         });
     }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        println!("Exiting...");
-        self.command.send(RPCCommand::Exit).unwrap();
+        info!("Exiting, joining all threads with best-effort...");
+        let mut joins = vec![];
+        for (id, t) in self.tree.tiles.iter() {
+            if let Tile::Pane(Pane::Board(bc, _)) = t {
+                let _ = bc.command.send(RPCCommand::Exit);
+                joins.push(*id);
+            }
+        }
+        for id in joins.into_iter() {
+            if let Some(Tile::Pane(Pane::Board(bc, _))) = self.tree.tiles.remove(id) {
+                let _ = bc.worker_thread.join();
+            }
+        }
     }
 }
 
-// Function to run a command and return the output
-fn run_command(command: &str) -> String {
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .output()
-        .expect("Failed to execute command");
+struct TreeBehavior {}
 
-    if output.status.success() {
-        String::from_utf8_lossy(&output.stdout).to_string()
-    } else {
-        String::from_utf8_lossy(&output.stderr).to_string()
+impl egui_tiles::Behavior<Pane> for TreeBehavior {
+    fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {
+        match pane {
+            Pane::Board(b, _) => b.connection_id.clone().into(),
+            Pane::SweepSetup(..) => "Setup Sweep".into(),
+        }
     }
-}
 
-// Function to set the scale value
-fn set_scale(tx: &Sender<RPCCommand>, scale: u16) -> Result<(), Box<dyn std::error::Error>> {
-    info!("Setting scale to: {}", scale);
-    tx.send(RPCCommand::SetFFTScale(scale))?;
-    Ok(())
-}
+    fn pane_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        _tile_id: egui_tiles::TileId,
+        pane: &mut Pane,
+    ) -> egui_tiles::UiResponse {
+        match pane {
+            Pane::Board(connection, data) => {
+                connection.ui(data, ui);
+            }
+            Pane::SweepSetup(..) => {}
+        }
+        Default::default()
+    }
 
-// Function to set the DAC table
-fn set_dac_table(
-    tx: &Sender<RPCCommand>,
-    data: Box<[Complex<i16>; 524288]>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    info!("Setting DAC table");
-    tx.send(RPCCommand::SetDACTable(data))?;
-    Ok(())
-}
-
-// Function to set the IF frequency
-fn set_if_freq(tx: &Sender<RPCCommand>, freq: Hertz) -> Result<(), Box<dyn std::error::Error>> {
-    info!("Setting IF frequency to: {}/{}", freq.numer(), freq.denom());
-    tx.send(RPCCommand::SetIFFreq(freq))?;
-    Ok(())
-}
-
-// Function to set the IF attenuations
-fn set_if_attens(
-    tx: &Sender<RPCCommand>,
-    attens: Attens,
-) -> Result<(), Box<dyn std::error::Error>> {
-    info!(
-        "Setting IF attenuations - Input: {}, Output: {}",
-        attens.input, attens.output
-    );
-    tx.send(RPCCommand::SetIFAttens(attens))?;
-    Ok(())
+    fn simplification_options(&self) -> egui_tiles::SimplificationOptions {
+        egui_tiles::SimplificationOptions {
+            prune_empty_tabs: false,
+            prune_empty_containers: false,
+            prune_single_child_tabs: false,
+            prune_single_child_containers: false,
+            ..Default::default()
+        }
+    }
 }
 
 // Outputting the gui
-pub fn run_gui(command: Sender<RPCCommand>, response: Receiver<RPCResponse>) {
+pub fn run_gui() {
     let native_options = NativeOptions::default();
+
+    let mut tiles = egui_tiles::Tiles::default();
+    let root = tiles.insert_tab_tile(vec![]);
+    let tree = egui_tiles::Tree::new("Root", root, tiles);
+
     eframe::run_native(
         "Reading Rainbow",
         native_options,
         Box::new(|_cc: &CreationContext| {
-            Ok(Box::new(MyApp {
-                current_pane: Pane::Settings,
-                command_input: String::new(),
-                command_output: String::new(),
-                status: Status::new(),
-                settings: Settings::default(),
-                command,
-                response,
-                error_message: None,
-                dac_table: None,
-                if_freq: None,
-                if_attens: None,
-                connection_time: None,
-                sweep_start_freq: String::new(),
-                sweep_stop_freq: String::new(),
-                sweep_count: String::new(),
-                sweep_freqs: Vec::new(),
-                sweep_input_atten: String::new(),
-                sweep_output_atten: String::new(),
-                sweep_dsp_scale: String::new(),
-                sweep_average: String::new(),
-                sweep_result: None,
+            Ok(Box::new(ReadingRainbow {
+                connection_string: "127.0.0.1".into(),
+                pending_connections: vec![],
+                tree,
+                tree_behavior: TreeBehavior {},
             }))
         }),
     )

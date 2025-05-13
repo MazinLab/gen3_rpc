@@ -1,43 +1,65 @@
 use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
 use futures::AsyncReadExt;
-use gen3_rpc::client::Tap;
-use gen3_rpc::utils::client::Sweep;
-use gen3_rpc::utils::client::SweepConfig;
-use gen3_rpc::{client::ExclusiveDroppableReference, Attens, DSPScaleError, Hertz};
-use log::{error, info};
+use gen3_rpc::client::{CaptureTap, RFChain, Tap};
+use gen3_rpc::utils::client::{DACCapabilities, PowerSetting, Sweep, SweepConfig};
+use gen3_rpc::{
+    client::ExclusiveDroppableReference, ActualizedDDCChannelConfig, DDCChannelConfig, Hertz,
+};
+use gen3_rpc::{gen3rpc_capnp, DDCCapabilities, Snap};
+use log::{error, info, warn};
 use num::Complex;
+use std::ops::Deref;
+use std::slice::Iter;
 use std::{
     fmt::Display,
     net::ToSocketAddrs,
-    sync::mpsc::{Receiver, Sender},
-    time::SystemTime,
+    sync::{
+        mpsc::{Receiver, Sender},
+        {Arc, RwLock},
+    },
 };
 use tokio::runtime::Runtime;
 
 /// Define RPC commands
 pub enum RPCCommand {
     Exit,
-    SetFFTScale(u16),
-    GetFFTScale,
-    GetDACTable,
-    SetDACTable(Box<[Complex<i16>; 524288]>),
-    GetIFFreq,
-    SetIFFreq(Hertz),
-    GetIFAttens,
-    SetIFAttens(Attens),
+    LoadSetup(BoardSetup),
     SweepConfig(SweepConfig),
-    PerformCapture,
+    PerformCapture(usize, CaptureType),
 }
 
 /// Define RPC responses
 pub enum RPCResponse {
-    Connected(SystemTime),
-    FFTScale(Option<u16>),
-    DACTable(Option<Box<[Complex<i16>; 524288]>>),
-    IFFreq(Option<Hertz>),
-    IFAttens(Option<Attens>),
+    Connected(Arc<RwLock<BoardState>>, DACCapabilities, DDCCapabilities),
     Sweep(Sweep),
-    CaptureResult(Vec<Complex<i16>>),
+    CaptureResult(Snap),
+}
+
+pub struct BoardSetup {
+    pub lo: Hertz,
+    pub power_setting: PowerSetting,
+    pub dac_table: Vec<Complex<i16>>,
+    pub ddc_config: Vec<DDCChannelConfig>,
+}
+
+#[derive(Clone)]
+pub struct BoardStateInner {
+    pub lo: Hertz,
+    pub power_setting: PowerSetting,
+    pub dac_table: Vec<Complex<i16>>,
+    pub ddc_config: Vec<ActualizedDDCChannelConfig>,
+}
+
+#[derive(Clone)]
+pub enum BoardState {
+    Operating(BoardStateInner),
+    Moving,
+}
+
+pub enum CaptureType {
+    RawIQ,
+    DDCIQ,
+    Phase,
 }
 
 pub fn worker_thread<T: ToSocketAddrs + Display>(
@@ -73,14 +95,10 @@ pub fn worker_thread<T: ToSocketAddrs + Display>(
                     client: rpc_system.bootstrap(rpc_twoparty_capnp::Side::Server),
                 };
 
-                // Send a connected response to the GUI with the current timestamp
-                let start_time = SystemTime::now();
-                response.send(RPCResponse::Connected(start_time)).unwrap();
-
                 tokio::task::spawn_local(rpc_system);
 
                 // Get DSP Scale, DAC Table, IF Board from board
-                let mut dsp_scale: ExclusiveDroppableReference<_, _> = board
+                let mut dsp_scale = board
                     .get_dsp_scale()
                     .await?
                     .try_into_mut()
@@ -92,6 +110,7 @@ pub fn worker_thread<T: ToSocketAddrs + Display>(
                     .try_into_mut()
                     .await?
                     .unwrap_or_else(|_| todo!());
+                let dac_caps = dac_table.capabilties().await?;
                 let mut if_board = board
                     .get_if_board()
                     .await?
@@ -99,133 +118,108 @@ pub fn worker_thread<T: ToSocketAddrs + Display>(
                     .await?
                     .unwrap_or_else(|_| todo!());
                 let capture = board.get_capture().await?;
+                let ddc = board.get_ddc().await?;
+
+                let mut ddc_channels: Vec<
+                    ExclusiveDroppableReference<gen3rpc_capnp::ddc_channel::Client, ()>,
+                > = vec![];
+
+                let mut bsi = BoardStateInner {
+                    lo: if_board.get_freq().await?,
+                    power_setting: PowerSetting {
+                        attens: if_board.get_attens().await?,
+                        fft_scale: dsp_scale.get_fft_scale().await?,
+                    },
+                    dac_table: dac_table.get_dac_table().await?,
+                    ddc_config: vec![],
+                };
+                let board_state = Arc::new(RwLock::new(BoardState::Operating(bsi.clone())));
+                response.send(RPCResponse::Connected(board_state.clone(), dac_caps, ddc.capabilities)).unwrap();
 
                 loop {
                     match command.recv().unwrap() {
-                        RPCCommand::Exit => return Ok(()),
-                        // Handle the SetFFTScale command
-                        RPCCommand::SetFFTScale(i) => {
-                            info!("Received SetFFTScale command with value: {}", i);
-                            let r = dsp_scale.set_fft_scale(i).await;
-                            match r {
-                                Ok(i) => response.send(RPCResponse::FFTScale(Some(i))).unwrap(),
-                                Err(DSPScaleError::Clamped(i)) => {
-                                    response.send(RPCResponse::FFTScale(Some(i))).unwrap()
-                                }
-                                Err(_) => response.send(RPCResponse::FFTScale(None)).unwrap(),
+                        RPCCommand::Exit => {
+                            let mut bs = board_state.write().unwrap();
+                            *bs = BoardState::Moving;
+                            return Ok(());
+                        }
+                        RPCCommand::LoadSetup(setup) => {
+                            info!("Loading Setup");
+                            {
+                                let mut bs = board_state.write().unwrap();
+                                *bs = BoardState::Moving;
                             }
-                        }
-                        // Handle the GetFFTScale command
-                        RPCCommand::GetFFTScale => {
-                            let r = dsp_scale.get_fft_scale().await;
-                            response.send(RPCResponse::FFTScale(r.ok())).unwrap()
-                        }
-                        // Handle the GetDACTable command
-                        RPCCommand::GetDACTable => {
-                            let r = dac_table.get_dac_table().await;
-                            match r {
-                                Ok(d) => response.send(RPCResponse::DACTable(Some(d))).unwrap(),
-                                Err(e) => {
-                                    error!("Failed to get DAC table: {}", e);
-                                    response.send(RPCResponse::DACTable(None)).unwrap()
-                                }
+                            if bsi.lo != setup.lo {
+                                bsi.lo = if_board.set_freq(setup.lo).await?;
                             }
-                        }
-                        // Handle the SetDACTable command
-                        RPCCommand::SetDACTable(data) => {
-                            let data_clone = data.clone();
-                            let r = dac_table.set_dac_table(data).await;
-                            match r {
-                                Ok(_) => response
-                                    .send(RPCResponse::DACTable(Some(data_clone)))
-                                    .unwrap(),
-                                Err(e) => {
-                                    error!("Failed to set DAC table: {}", e);
-                                    response.send(RPCResponse::DACTable(None)).unwrap()
-                                }
+                            if bsi.power_setting.attens != setup.power_setting.attens {
+                                bsi.power_setting.attens = if_board.set_attens(setup.power_setting.attens).await?;
                             }
-                        }
-                        // Handle the GetIFFreq command
-                        RPCCommand::GetIFFreq => {
-                            let r = if_board.get_freq().await;
-                            response.send(RPCResponse::IFFreq(r.ok())).unwrap()
-                        }
-                        // Handle the SetIFFreq command
-                        RPCCommand::SetIFFreq(freq) => {
-                            let r = if_board.set_freq(freq).await;
-                            match r {
-                                Ok(f) => response.send(RPCResponse::IFFreq(Some(f))).unwrap(),
-                                Err(e) => {
-                                    error!("Failed to set IF frequency: {:?}", e);
-                                    response.send(RPCResponse::IFFreq(None)).unwrap()
+                            if bsi.power_setting.fft_scale != setup.power_setting.fft_scale {
+                                bsi.power_setting.fft_scale = dsp_scale
+                                    .set_fft_scale(setup.power_setting.fft_scale)
+                                    .await?;
+                            }
+                            if bsi.dac_table != setup.dac_table {
+                                dac_table.set_dac_table(setup.dac_table.clone()).await?;
+                                bsi.dac_table = setup.dac_table;
+                            }
+                            if setup.ddc_config.len() < ddc_channels.len() {
+                                ddc_channels.truncate(setup.ddc_config.len());
+                                bsi.ddc_config.truncate(setup.ddc_config.len());
+                            }
+                            for (i, (setup, real)) in setup
+                                .ddc_config
+                                .iter()
+                                .zip(bsi.ddc_config.iter())
+                                .enumerate()
+                            {
+                                if setup.dest_bin.is_some_and(|db| db != real.dest_bin) {
+                                    warn!(
+                                        "Dest bins don't match in requested and actual setup at {}, reallocating",
+                                        i
+                                    );
+                                    ddc_channels.truncate(i);
+                                    bsi.ddc_config.truncate(i);
+                                    break;
                                 }
                             }
-                        }
-                        // Handle the GetIFAttens command
-                        RPCCommand::GetIFAttens => {
-                            info!("Received GetIFAttens command");
-                            let r = if_board.get_attens().await;
-                            match r {
-                                Ok(a) => response.send(RPCResponse::IFAttens(Some(a))).unwrap(),
-                                Err(e) => {
-                                    error!("Failed to get IF attenuations: {:?}", e);
-                                    response.send(RPCResponse::IFAttens(None)).unwrap()
-                                }
+                            for i in 0..(setup.ddc_config.len().min(bsi.ddc_config.len())) {
+                                ddc_channels[i].set(setup.ddc_config[i].clone().erase()).await?;
+                                bsi.ddc_config[i] = ddc_channels[i].get().await?;
+                            }
+                            for i in (setup.ddc_config.len().min(bsi.ddc_config.len()))..setup.ddc_config.len() {
+                                ddc_channels.push(ddc.allocate_channel(setup.ddc_config[i].clone()).await?.try_into_mut().await.unwrap().unwrap_or_else(|_| todo!()));
+                                bsi.ddc_config.push(ddc_channels[i].get().await?);
+                            }
+                            {
+                                let mut bs = board_state.write().unwrap();
+                                *bs = BoardState::Operating(bsi.clone())
                             }
                         }
-                        // Handle the SetIFAttens command
-                        RPCCommand::SetIFAttens(attens) => {
-                            let r = if_board.set_attens(attens).await;
-                            match r {
-                                Ok(a) => response.send(RPCResponse::IFAttens(Some(a))).unwrap(),
-                                Err(e) => {
-                                    error!("Failed to set IF attenuations: {:?}", e);
-                                    response.send(RPCResponse::IFAttens(None)).unwrap()
-                                }
-                            }
-                        }
-                        // Handle the PerformCapture command
-                        RPCCommand::PerformCapture => {
+                        RPCCommand::PerformCapture(count, capture_type) => {
                             info!("Performing Capture:");
-
                             // Perform the capture
-                            let rfchain = gen3_rpc::client::RFChain {
+                            let rfchain = RFChain {
                                 dac_table: &dac_table,
                                 if_board: &if_board,
                                 dsp_scale: &dsp_scale,
                             };
 
-                            let tap = gen3_rpc::client::CaptureTap::new(
-                                &rfchain,
-                                gen3_rpc::client::Tap::RawIQ,
-                            );
+                            let it = ddc_channels.iter().map(|f| f.deref());
+                            let tap = match capture_type {
+                                CaptureType::RawIQ => CaptureTap::new(rfchain, Tap::RawIQ),
+                                CaptureType::DDCIQ => {
+                                    CaptureTap::new(rfchain, Tap::DDCIQ(it))
+                                },
+                                CaptureType::Phase => {
+                                    CaptureTap::new(rfchain, Tap::Phase(it))
+                                },
+                            };
 
-                            let result = capture.capture(tap, 1).await;
 
-                            match result {
-                                Ok(snap) => {
-                                    match snap {
-                                        gen3_rpc::Snap::Raw(data) => {
-                                            info!("Capture successful");
-                                            response
-                                                .send(RPCResponse::CaptureResult(data))
-                                                .unwrap();
-                                        }
-                                        _ => {
-                                            error!("Unexpected Snap type: {:?}", snap);
-                                            // Account for improper capture input
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("Capture failed: {:?}", e); // Error to prevent gui from crashing
-                                    response
-                                        .send(RPCResponse::CaptureResult(vec![]))
-                                        .unwrap_or_else(|err| {
-                                            error!("Failed to send error response: {:?}", err)
-                                        }); // Error to prevent gui panic
-                                }
-                            }
+                            let result = capture.capture(tap, count as u64).await?;
+                            response.send(RPCResponse::CaptureResult(result)).unwrap();
                         }
                         // Handle the SweepConfig command
                         RPCCommand::SweepConfig(config) => {
@@ -234,7 +228,7 @@ pub fn worker_thread<T: ToSocketAddrs + Display>(
                             let result = config
                                 .sweep(
                                     &capture,
-                                    Tap::RawIQ,
+                                    Tap::<'_, Iter<_>>::RawIQ,
                                     &mut if_board,
                                     &mut dsp_scale,
                                     &dac_table,
