@@ -72,9 +72,55 @@ impl MMIO {
     }
 }
 
+struct BinToRes {
+    mmio: MMIO,
+    cache: [u32; 2048],
+}
+
+impl BinToRes {
+    fn new(mmio: MMIO) -> BinToRes {
+        let mut btr = BinToRes {
+            mmio,
+            cache: [1; 2048],
+        };
+
+        for i in 0..2048 {
+            btr.set(i, 0);
+        }
+
+        btr
+    }
+    fn set(&mut self, dest_bin: u32, source_bin: u32) {
+        assert!(dest_bin < 2048);
+        assert!(source_bin < 4096);
+
+        if self.cache[dest_bin as usize] == source_bin {
+            return;
+        }
+
+        self.cache[dest_bin as usize] = source_bin;
+        let group = dest_bin as usize / 8;
+        let group_base = 4096 + group * 16;
+        let group_start = group * 8;
+
+        let mut acc: u128 = 0;
+        for i in 0..8 {
+            acc |= ((self.cache[group_start + i] as u128) & 0xfffu128).shl(12 * i)
+        }
+        let acc = acc.to_le_bytes();
+        for i in 0..3 {
+            self.mmio.write(
+                group_base + i * 4,
+                u32::from_le_bytes([acc[4 * i], acc[1 + 4 * i], acc[2 + 4 * i], acc[3 + 4 * i]]),
+            );
+        }
+    }
+}
+
 #[derive(Clone)]
 struct TripartiteDDC {
     mmio: Arc<Mutex<MMIO>>,
+    bintores: Arc<Mutex<BinToRes>>,
     inner: (ActualizedDDCChannelConfig, DDCCapabilities),
 }
 
@@ -106,6 +152,9 @@ impl TripartiteDDC {
         let mut mmio = self.mmio.lock().unwrap();
         mmio.write((group_address + group_offset * 4) as usize, tone);
         mmio.write((group_address + group_offset * 4 + 4 * 8) as usize, center);
+
+        let mut btr = self.bintores.lock().unwrap();
+        btr.set(self.inner.0.dest_bin, self.inner.0.source_bin);
     }
 }
 
@@ -236,7 +285,7 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
 }
 
 impl DDCChannel for TripartiteDDC {
-    type Shared = Arc<Mutex<MMIO>>;
+    type Shared = (Arc<Mutex<MMIO>>, Arc<Mutex<BinToRes>>);
     fn from_actualized(
         setup: ActualizedDDCChannelConfig,
         caps: DDCCapabilities,
@@ -245,7 +294,8 @@ impl DDCChannel for TripartiteDDC {
         assert!(2 * caps.center_bits <= 32);
         assert!(caps.rotation_bits + caps.freq_bits <= 32);
         let mut tp = TripartiteDDC {
-            mmio: shared,
+            mmio: shared.0,
+            bintores: shared.1,
             inner: (setup.clone(), caps),
         };
         tp.set(setup.erase())?;
@@ -525,6 +575,30 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                 ol.unbind()
             });
 
+            info!("Initilizing Bin2Res");
+            let (btr_addr, btr_range) = Python::with_gil(|py| -> (usize, usize) {
+                let btrmmio = ol
+                    .getattr(py, "photon_pipe")
+                    .unwrap()
+                    .getattr(py, "reschan")
+                    .unwrap()
+                    .getattr(py, "bin_to_res")
+                    .unwrap()
+                    .getattr(py, "mmio")
+                    .unwrap();
+                (
+                    btrmmio
+                        .getattr(py, "base_addr")
+                        .unwrap()
+                        .extract(py)
+                        .unwrap(),
+                    btrmmio.getattr(py, "length").unwrap().extract(py).unwrap(),
+                )
+            });
+
+            let mmio = unsafe { MMIO::new(btr_addr, btr_range) };
+            let btr = Arc::new(Mutex::new(BinToRes::new(mmio)));
+
             info!("Initilizing DDC Control MMIO");
             let (ddc_addr, ddc_range) = Python::with_gil(|py| -> (usize, usize) {
                 let ddcmmio = ol
@@ -567,7 +641,7 @@ pub async fn pyo3server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
                         center_bits: 16,
                         bin_control: gen3_rpc::BinControl::FullSwizzle,
                     },
-                    mmio,
+                    (mmio, btr),
                 ),
                 PyO3Capture::new(&ol),
             );
