@@ -1,5 +1,5 @@
 use env_logger::Env;
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 
 use numpy::{Complex32, Ix2, Ix3, PyArrayLike2, PyArrayLike3, PyUntypedArrayMethods, ToPyArray};
 use pyo3::{
@@ -91,6 +91,7 @@ impl BinToRes {
         btr
     }
     fn set(&mut self, dest_bin: u32, source_bin: u32) {
+        trace!("Setting dest bin {} to {}", dest_bin, source_bin);
         assert!(dest_bin < 2048);
         assert!(source_bin < 4096);
 
@@ -109,9 +110,12 @@ impl BinToRes {
         }
         let acc = acc.to_le_bytes();
         for i in 0..3 {
+            let address = group_base + i * 4;
+            let data = u32::from_le_bytes([acc[4 * i], acc[1 + 4 * i], acc[2 + 4 * i], acc[3 + 4 * i]]); 
+            trace!("Writing Group 0x{:08x} - {}", address, data);
             self.mmio.write(
-                group_base + i * 4,
-                u32::from_le_bytes([acc[4 * i], acc[1 + 4 * i], acc[2 + 4 * i], acc[3 + 4 * i]]),
+                address,
+                data
             );
         }
     }
@@ -196,8 +200,10 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                         let npar = py.import("numpy").unwrap().getattr("array").unwrap();
                         let snap =
                             cap.call_method(py, "capture_adc", (length, false, false, true), None)?;
+                        debug!("Snap Succeded");
                         let snaparr: PyArrayLike2<i16> =
                             npar.call1((&snap,)).unwrap().extract().unwrap();
+                        debug!("Snap Retrieved");
                         let s = gen3_rpc::Snap::Raw(
                             (0..length as usize)
                                 .map(|i| {
@@ -209,6 +215,7 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                                 .collect(),
                         );
                         snap.call_method0(py, "freebuffer").unwrap();
+                        debug!("Buffer Freed");
                         Ok(s)
                     })
                 }
@@ -219,9 +226,10 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                     Python::with_gil(|py| -> Result<gen3_rpc::Snap, PyErr> {
                         let npar = py.import("numpy").unwrap().getattr("array").unwrap();
                         let snap = cap.call_method(py, "capture", (length, "ddciq"), None)?;
+                        debug!("Snap Succeded");
                         let snaparr: PyArrayLike3<i16> =
                             npar.call1((&snap,)).unwrap().extract().unwrap();
-                        debug!("Array Shape {:?}", snaparr.shape());
+                        debug!("Snap Retrieved -- Array Shape {:?}", snaparr.shape());
                         let s = gen3_rpc::Snap::DdcIQ(
                             d.into_iter()
                                 .map(|d| {
@@ -237,6 +245,7 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                                 .collect(),
                         );
                         snap.call_method0(py, "freebuffer").unwrap();
+                        debug!("Buffer Freed");
                         Ok(s)
                     })
                 }
@@ -247,9 +256,10 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                     Python::with_gil(|py| -> Result<gen3_rpc::Snap, PyErr> {
                         let npar = py.import("numpy").unwrap().getattr("array").unwrap();
                         let snap = cap.call_method(py, "capture", (length, "filtphase"), None)?;
+                        debug!("Snap Succeded");
                         let snaparr: PyArrayLike2<i16> =
                             npar.call1((&snap,)).unwrap().extract().unwrap();
-                        debug!("Array Shape {:?}", snaparr.shape());
+                        debug!("Snap Retrieved -- Array Shape {:?}", snaparr.shape());
                         let s = gen3_rpc::Snap::Phase(
                             p.into_iter()
                                 .map(|d| {
@@ -260,6 +270,7 @@ impl Capture<gen3_rpc::Snap> for PyO3Capture {
                                 .collect(),
                         );
                         snap.call_method0(py, "freebuffer").unwrap();
+                        debug!("Buffer Freed");
                         Ok(s)
                     })
                 }
