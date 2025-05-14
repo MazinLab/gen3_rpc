@@ -170,6 +170,7 @@ pub mod client {
         ActualizedDDCChannelConfig, AttenError, Attens, Gen3RpcError, Hertz, SnapAvg,
     };
 
+    use log::debug;
     use num::{traits::Inv, BigInt, BigRational, Complex};
 
     use rand::prelude::*;
@@ -200,6 +201,7 @@ pub mod client {
         };
         let mut input = start;
         loop {
+            debug!("Trying input: {}, output: {}", input, output);
             let att = if_board.set_attens(Attens { input, output }).await;
             match att {
                 Ok(att) => {
@@ -241,6 +243,7 @@ pub mod client {
                 }
             };
             let range = m as f32 / 32764.;
+            debug!("Had range {}", range);
             if range > dynamic_range {
                 input += step;
                 break;
@@ -250,6 +253,7 @@ pub mod client {
         let att = if_board.set_attens(Attens { input, output }).await?;
         let mut idx = 0;
         while idx < FFT_AGC_OPTIONS.len() {
+            debug!("Trying FFT Scale: {:x}", FFT_AGC_OPTIONS[idx]);
             dsp_scale.set_fft_scale(FFT_AGC_OPTIONS[idx]).await?;
             let snap = capture
                 .capture(
@@ -261,9 +265,10 @@ pub mod client {
                         },
                         tap: tap.clone(),
                     },
-                    1 << 19,
+                    256 * 4,
                 )
                 .await?;
+            debug!("Got Snap...");
             let m = match snap {
                 crate::Snap::DdcIQ(d) => d
                     .into_iter()
@@ -279,13 +284,14 @@ pub mod client {
                 }
             };
             let range = m as f32 / 32764.;
+            debug!("Had range {}", range);
             if range > dynamic_range {
                 idx = idx.saturating_sub(1);
                 break;
             }
             idx += 1
         }
-        idx = idx.min(FFT_AGC_OPTIONS.len());
+        idx = idx.min(FFT_AGC_OPTIONS.len() - 1);
         Ok(PowerSetting {
             attens: att,
             fft_scale: FFT_AGC_OPTIONS[idx],
@@ -297,7 +303,7 @@ pub mod client {
         Single { freq: T, amplitude: f64, phase: f64 },
     }
 
-    impl<T: PartialEq> Tone<T> {
+    impl<T: PartialEq + Clone> Tone<T> {
         pub fn randomize_phase(&mut self, rng: &mut ThreadRng) {
             match self {
                 Tone::Single {
@@ -315,6 +321,12 @@ pub mod client {
                     amplitude,
                     phase: _,
                 } => *amplitude *= gain,
+            }
+        }
+
+        pub fn central(&self) -> T {
+            match self {
+                Tone::Single { freq, .. } => freq.clone(),
             }
         }
     }
@@ -341,7 +353,12 @@ pub mod client {
                     amplitude,
                     phase,
                 } => {
-                    ifft[*freq] += amplitude
+                    let freq = if *freq >= (ifft.len() / 2) {
+                        *freq - ifft.len() / 2
+                    } else {
+                        *freq + ifft.len() / 2
+                    };
+                    ifft[freq] += amplitude
                         * Complex64::exp(2. * std::f64::consts::PI * Complex64::i() * phase)
                 }
             }
@@ -586,7 +603,7 @@ pub mod client {
                         if *a == setting.attens {
                             v.push(r);
                             assert!(
-                                v.len() < capacity,
+                                v.len() <= capacity,
                                 "More samples recieved than should have been"
                             );
                             return;
@@ -601,7 +618,7 @@ pub mod client {
                         if *a == setting {
                             v.push(d);
                             assert!(
-                                v.len() < capacity,
+                                v.len() <= capacity,
                                 "More samples recieved than should have been"
                             );
                             return;
@@ -616,7 +633,7 @@ pub mod client {
                         if *a == setting {
                             v.push(p);
                             assert!(
-                                v.len() < capacity,
+                                v.len() <= capacity,
                                 "More samples recieved than should have been"
                             );
                             return;

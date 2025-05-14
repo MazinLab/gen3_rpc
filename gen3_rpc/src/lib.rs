@@ -634,7 +634,7 @@ impl DDCCapabilities {
             .unwrap();
 
         let centered = tone - min.1;
-        (min.0, self.quantize_centered_tone(centered))
+        (min.0 as u32, self.quantize_centered_tone(centered))
     }
 
     #[inline]
@@ -645,25 +645,20 @@ impl DDCCapabilities {
     }
 
     #[inline]
-    pub fn bin_centers(&self) -> Vec<(u32, Hertz)> {
+    pub fn bin_centers(&self) -> Vec<(usize, Hertz)> {
         assert!(self.opfb_channels % 2 == 0);
         (0..self.opfb_channels / 2)
             .map(|i| {
-                (
-                    i,
-                    Hertz::new(i as i64, 1)
-                        * self.opfb_samplerate
-                        * Hertz::new(1, self.opfb_channels as i64),
-                )
+                Hertz::new(i as i64, 1)
+                    * self.opfb_samplerate
+                    * Hertz::new(1, self.opfb_channels as i64)
             })
             .chain((1..self.opfb_channels / 2 + 1).rev().map(|i| {
-                (
-                    i,
-                    -Hertz::new(i as i64, 1)
-                        * self.opfb_samplerate
-                        * Hertz::new(1, self.opfb_channels as i64),
-                )
+                -Hertz::new(i as i64, 1)
+                    * self.opfb_samplerate
+                    * Hertz::new(1, self.opfb_channels as i64)
             }))
+            .enumerate()
             .collect()
     }
 }
