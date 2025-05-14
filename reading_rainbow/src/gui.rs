@@ -7,21 +7,24 @@
 use crate::worker::{worker_thread, BoardSetup, BoardState, CaptureType, RPCCommand, RPCResponse};
 
 use eframe::{egui, App, CreationContext, NativeOptions};
-use egui_plot::{AxisHints, HPlacement, Line, Plot, PlotPoints};
+use egui_plot::{AxisHints, HPlacement, Line, Plot, PlotPoints, Points};
 use egui_tiles::Tile;
 use gen3_rpc::{
     utils::client::{
         DACBuilder, DACCapabilities, ExactTone, ImpreciseTone, PowerSetting, Quantizable, Sweep,
-        FFT_AGC_OPTIONS,
+        SweepResult, FFT_AGC_OPTIONS,
     },
-    Attens, DDCCapabilities, DDCChannelConfig, Hertz, Snap,
+    Attens, DDCCapabilities, DDCChannelConfig, Hertz, Snap, SnapAvg,
 };
 use num::Complex;
+use num_complex::ComplexFloat;
 
 use std::{
+    collections::HashMap,
+    io::Write,
     net::ToSocketAddrs,
     sync::{
-        mpsc::{channel, Receiver, Sender},
+        mpsc::{channel, Receiver, Sender, TryRecvError},
         Arc, RwLock,
     },
     thread::{spawn, JoinHandle},
@@ -48,6 +51,24 @@ struct BoardConnectionUIData {
     capture_count: usize,
     setup: SetupUIData,
     snapdata: SnapUIData,
+    sweepuidata: SweepUIData,
+    sweepsetup: SweepSetupUIData,
+}
+
+#[derive(Default)]
+struct SweepUIData {
+    reciever: Option<Receiver<(Hertz, PowerSetting, SnapAvg)>>,
+    current_sweep: Vec<(PowerSetting, Vec<(Hertz, SnapAvg)>)>,
+    tones: Vec<Hertz>,
+}
+
+#[derive(Default, Clone)]
+pub struct SweepSetupUIData {
+    pub output_min: f64,
+    pub output_max: f64,
+    pub output_step: f64,
+    pub bandwidth: f64,
+    pub count: usize,
 }
 
 struct SetupUIData {
@@ -55,7 +76,6 @@ struct SetupUIData {
     input_atten: f64,
     fft_scale: u16,
     agc: bool,
-
     start: f64,
     stop: f64,
     count: usize,
@@ -70,7 +90,6 @@ impl Default for SetupUIData {
             input_atten: 63.5,
             fft_scale: 0xfff,
             agc: true,
-
             start: -128.,
             stop: 128.,
             count: 128,
@@ -88,10 +107,18 @@ trait UIAble {
     fn ui(&mut self, data: &mut Self::UIData, ui: &mut egui::Ui);
 }
 
+impl UIAble for Sweep {
+    type UIData = SweepUIData;
+    fn ui(&mut self, _data: &mut Self::UIData, ui: &mut egui::Ui) {
+        Plot::new("Sweep").show(ui, |ui| {});
+    }
+}
+
 #[derive(Default)]
 struct SnapUIData {
     ddc_channel: usize,
     show_phase: bool,
+    fft: bool,
 }
 
 impl UIAble for Snap {
@@ -99,6 +126,18 @@ impl UIAble for Snap {
     fn ui(&mut self, data: &mut Self::UIData, ui: &mut egui::Ui) {
         match self {
             Self::Raw(iq) => {
+                // if ui.button("Save").clicked() {
+                //     let mut w = vec![];
+                //     writeln!(&mut w, "snap = [").unwrap();
+                //     for c in iq.clone().iter() {
+                //         writeln!(&mut w, "({}) + 1.j * ({}),", c.re, c.im).unwrap();
+                //     }
+                //     writeln!(&mut w, "]").unwrap();
+                //     std::fs::File::create("/tmp/snap.py")
+                //         .unwrap()
+                //         .write_all(&w)
+                //         .unwrap();
+                // }
                 let real_points: PlotPoints =
                     (0..iq.len()).map(|i| [i as f64, iq[i].re as f64]).collect();
                 let imag_points: PlotPoints =
@@ -121,6 +160,7 @@ impl UIAble for Snap {
                             .text("Channel"),
                     );
                     ui.checkbox(&mut data.show_phase, "Computed Phase");
+                    ui.checkbox(&mut data.fft, "FFT")
                 });
                 let real_points: PlotPoints = (0..iqs[data.ddc_channel].len())
                     .map(|i| [i as f64, iqs[data.ddc_channel][i].re as f64])
@@ -211,7 +251,7 @@ impl UIAble for BoardConnection {
     type UIData = BoardConnectionUIData;
 
     fn ui(&mut self, data: &mut Self::UIData, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.vertical(|ui| {
             ui.vertical(|ui| {
                 // Compiler should optimize out this clone :fingers_crossed:
                 let s = self.state.read().unwrap().clone();
@@ -262,7 +302,7 @@ impl UIAble for BoardConnection {
                 }
             });
             ui.separator();
-            ui.vertical(|ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 // ui.set_height(ui.available_height());
                 ui.collapsing("Capture", |ui| {
@@ -312,6 +352,188 @@ impl UIAble for BoardConnection {
                         snap.ui(&mut data.snapdata, ui);
                     }
                 });
+                ui.collapsing("Sweep", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                if ui.button("Run").clicked() {
+                                    let (send, recv) = channel();
+                                    self.command
+                                        .send(RPCCommand::SweepConfig(
+                                            data.sweepsetup.clone(),
+                                            send,
+                                        ))
+                                        .unwrap();
+
+                                    data.sweepuidata.reciever = Some(recv);
+                                    data.sweepuidata.current_sweep = vec![];
+                                }
+                                ui.add_enabled_ui(data.sweepuidata.reciever.is_some(), |ui| {
+                                    if ui.button("Cancel").clicked() {
+                                        data.sweepuidata.reciever = None;
+                                    }
+                                });
+                            });
+                            let mut canceled = false;
+                            data.sweepuidata.reciever.iter_mut().for_each(|recv| {
+                                while match recv.try_recv() {
+                                    Ok((f, p, a)) => {
+                                        let mut index = data.sweepuidata.current_sweep.len();
+                                        for (i, s) in
+                                            data.sweepuidata.current_sweep.iter().enumerate().rev()
+                                        {
+                                            if s.0 == p {
+                                                index = i;
+                                                break;
+                                            }
+                                        }
+                                        if index == data.sweepuidata.current_sweep.len() {
+                                            data.sweepuidata.current_sweep.push((p, vec![]));
+                                        }
+                                        data.sweepuidata.current_sweep[index].1.push((f, a));
+                                        data.sweepuidata.current_sweep[index]
+                                            .1
+                                            .sort_by(|a, b| a.0.cmp(&b.0));
+                                        true
+                                    }
+                                    Err(TryRecvError::Disconnected) => {
+                                        canceled = true;
+                                        false
+                                    }
+                                    _ => false,
+                                } {}
+                            });
+                            if canceled {
+                                data.sweepuidata.reciever = None;
+                            }
+                            egui::Grid::new("ssettings")
+                                .num_columns(2)
+                                .spacing([40., 2.])
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.label("Bandwidth (MHz)");
+                                    ui.add(
+                                        egui::DragValue::new(&mut data.sweepsetup.bandwidth)
+                                            .range(7812.5 / 1e6..=512.),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label("Frequency Count");
+                                    ui.add(
+                                        egui::DragValue::new(&mut data.sweepsetup.count)
+                                            .range(1..=32768),
+                                    );
+
+                                    ui.end_row();
+
+                                    ui.label("Frequency Step");
+                                    ui.label(format!(
+                                        "{} Hz",
+                                        data.sweepsetup.bandwidth * 1e6
+                                            / data.sweepsetup.count as f64
+                                    ));
+                                    ui.end_row();
+
+                                    ui.label("Output Atten Start (dB)");
+                                    ui.add(
+                                        egui::DragValue::new(&mut data.sweepsetup.output_min)
+                                            .range(0f64..=data.sweepsetup.output_max),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label("Output Atten Stop (dB)");
+                                    ui.add(
+                                        egui::DragValue::new(&mut data.sweepsetup.output_max)
+                                            .range(data.sweepsetup.output_min..=63.25),
+                                    );
+                                    ui.end_row();
+
+                                    ui.label("Output Atten Step (dB)");
+                                    ui.add(
+                                        egui::DragValue::new(&mut data.sweepsetup.output_step)
+                                            .range(0.25..=63.25),
+                                    );
+                                    ui.end_row();
+                                });
+                        });
+                        ui.separator();
+                        ui.vertical(|ui| {
+                            // data.latest_sweep
+                            //     .iter_mut()
+                            //     .for_each(|f| f.ui(&mut data.sweepuidata, ui));
+                            ui.horizontal(|ui| {
+                                Plot::new(format!(
+                                    "SweepWatchLoop{}",
+                                    data.sweepuidata.current_sweep.len()
+                                ))
+                                .width(ui.available_width() / 2.)
+                                .data_aspect(1.0)
+                                .view_aspect(1.0)
+                                .show(ui, |ui| {
+                                    for (_p, v) in data.sweepuidata.current_sweep.iter() {
+                                        for (f, s) in v.iter() {
+                                            match s {
+                                                SnapAvg::Raw(c) => {
+                                                    ui.points(Points::new(
+                                                        format!("{}", f),
+                                                        vec![[c.re, c.im]],
+                                                    ));
+                                                }
+                                                SnapAvg::DdcIQ(vc) => {
+                                                    for (i, c) in vc.iter().enumerate() {
+                                                        ui.points(Points::new(
+                                                            format!("{} {}", f, i),
+                                                            vec![[c.re, c.im]],
+                                                        ));
+                                                    }
+                                                }
+                                                SnapAvg::Phase(_) => {}
+                                            }
+                                        }
+                                    }
+                                });
+                                Plot::new(format!(
+                                    "SweepWatch{}",
+                                    data.sweepuidata.current_sweep.len()
+                                ))
+                                .height(ui.available_width())
+                                .view_aspect(1.)
+                                .show(ui, |ui| {
+                                    for (_p, v) in data.sweepuidata.current_sweep.iter() {
+                                        for (f, s) in v.iter() {
+                                            match s {
+                                                SnapAvg::Raw(c) => {
+                                                    let f = 1e-6 * *f.numer() as f64
+                                                        / *f.denom() as f64;
+                                                    ui.points(Points::new(
+                                                        format!("{}", f),
+                                                        vec![[f, c.abs()]],
+                                                    ));
+                                                }
+                                                SnapAvg::DdcIQ(vc) => {
+                                                    assert!(
+                                                        vc.len() == data.sweepuidata.tones.len()
+                                                    );
+                                                    for (i, c) in vc.iter().enumerate() {
+                                                        let f = *f + data.sweepuidata.tones[i];
+                                                        let f =
+                                                            *f.numer() as f64 / *f.denom() as f64;
+                                                        let f = f / 1e6;
+                                                        ui.points(Points::new(
+                                                            format!("{} {}", f, i),
+                                                            vec![[f, c.abs()]],
+                                                        ));
+                                                    }
+                                                }
+                                                SnapAvg::Phase(_) => {}
+                                            }
+                                        }
+                                    }
+                                });
+                            });
+                        });
+                    });
+                });
                 ui.collapsing("Setup", |ui| {
                     if ui.button("Load").clicked() {
                         let ddc_config = data
@@ -321,6 +543,7 @@ impl UIAble for BoardConnection {
                             .clone()
                             .into_iter()
                             .map(|t| -> DDCChannelConfig {
+                                //TODO: Use to_central
                                 let exact = t.to_exact(&self.dac_capabilities);
                                 match exact {
                                     ExactTone::Single {
@@ -340,6 +563,15 @@ impl UIAble for BoardConnection {
                                 }
                             })
                             .collect();
+                        data.sweepuidata.tones = data
+                            .setup
+                            .db
+                            .tones
+                            .clone()
+                            .into_iter()
+                            .map(|t| t.to_exact(&self.dac_capabilities).central())
+                            .collect();
+                        println!("{:?}", data.sweepuidata.tones);
                         self.command
                             .send(RPCCommand::LoadSetup(BoardSetup {
                                 lo: Hertz::new(6_000_000_000, 1),
@@ -495,15 +727,6 @@ impl ReadingRainbow {
     }
 }
 
-// pub struct SweepSetup {
-//     output_min: f64,
-//     output_max: f64,
-//     output_step: f64,
-//     bandwidth: f64,
-//     step: f64,
-//     lo_center: f64,
-// }
-
 // Defining each gui pane/clickable functionality
 impl App for ReadingRainbow {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -602,8 +825,10 @@ impl App for ReadingRainbow {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         info!("Exiting, joining all threads with best-effort...");
         let mut joins = vec![];
-        for (id, t) in self.tree.tiles.iter() {
-            if let Tile::Pane(Pane::Board(bc, _)) = t {
+        for (id, t) in self.tree.tiles.iter_mut() {
+            if let Tile::Pane(Pane::Board(bc, data)) = t {
+                // Cancel any active sweep
+                data.sweepuidata.reciever = None;
                 let _ = bc.command.send(RPCCommand::Exit);
                 joins.push(*id);
             }

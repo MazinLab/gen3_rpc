@@ -1,13 +1,14 @@
 use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
 use futures::AsyncReadExt;
 use gen3_rpc::client::{CaptureTap, RFChain, Tap};
-use gen3_rpc::utils::client::{DACCapabilities, PowerSetting, Sweep, SweepConfig};
+use gen3_rpc::utils::client::{agc, DACCapabilities, PowerSetting, Sweep, SweepConfig};
 use gen3_rpc::{
     client::ExclusiveDroppableReference, ActualizedDDCChannelConfig, DDCChannelConfig, Hertz,
 };
-use gen3_rpc::{gen3rpc_capnp, DDCCapabilities, Snap};
+use gen3_rpc::{gen3rpc_capnp, DDCCapabilities, Snap, SnapAvg};
 use log::{error, info, warn};
 use num::Complex;
+use std::io::Write;
 use std::ops::Deref;
 use std::slice::Iter;
 use std::{
@@ -20,11 +21,12 @@ use std::{
 };
 use tokio::runtime::Runtime;
 
+use crate::gui::SweepSetupUIData;
 /// Define RPC commands
 pub enum RPCCommand {
     Exit,
     LoadSetup(BoardSetup),
-    SweepConfig(SweepConfig),
+    SweepConfig(SweepSetupUIData, Sender<(Hertz, PowerSetting, SnapAvg)>),
     PerformCapture(usize, CaptureType),
 }
 
@@ -222,27 +224,48 @@ pub fn worker_thread<T: ToSocketAddrs + Display>(
                             response.send(RPCResponse::CaptureResult(result)).unwrap();
                         }
                         // Handle the SweepConfig command
-                        RPCCommand::SweepConfig(config) => {
+                        RPCCommand::SweepConfig(setup, sender) => {
                             info!("Performing Sweep:");
+
+                            let mut settings = vec![];
+                            for o in 0..((setup.output_max - setup.output_min) / setup.output_step) as usize {
+                                let o = o as f32* setup.output_step as f32 + setup.output_min as f32;
+                                info!("Running AGC for {}", o);
+                                let ps = agc(o, 63.25, 0.25, 0.25, Tap::DDCIQ(ddc_channels.iter().map(|f| f.deref())), &capture, &dac_table, &mut if_board, &mut dsp_scale).await?;
+                                settings.push(ps);
+                            }
+
+                            let bw = setup.bandwidth * 1e6 * 1e6;
+                            let bw = Hertz::new(bw as i64, 1_000_000);
+                            let step = bw / Hertz::from_integer(setup.count as i64);
+
+                            let config = SweepConfig {
+                                settings,
+                                average: 8192,
+                                freqs: (0..setup.count).map(|i| bsi.lo - bw / Hertz::from_integer(2) + step * Hertz::from_integer(i as i64)).collect(),
+                            };
 
                             let result = config
                                 .sweep(
                                     &capture,
-                                    Tap::<'_, Iter<_>>::RawIQ,
+                                    Tap::DDCIQ(ddc_channels.iter().map(|f| f.deref())),
                                     &mut if_board,
                                     &mut dsp_scale,
                                     &dac_table,
-                                    None,
+                                    Some(sender),
                                 )
                                 .await;
 
                             match result {
                                 Ok(sweep) => {
-                                    info!("Sweep successful");
                                     response.send(RPCResponse::Sweep(sweep)).unwrap();
+                                    info!("Sweep Complete");
+                                },
+                                Err(gen3_rpc::Gen3RpcError::Interupted) => {
+                                    warn!("Sweep Interrupted");
                                 }
                                 Err(e) => {
-                                    error!("Sweep failed: {:?}", e);
+                                    Err(e)?
                                 }
                             }
                         }
