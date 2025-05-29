@@ -792,6 +792,15 @@ impl App for ReadingRainbow {
         }
 
         egui::SidePanel::left("Status").show(ctx, |ui| {
+            // Select IP address 
+            ui.horizontal(|ui| {
+                if ui.button("mockserver").clicked() {
+                    self.connection_string = "127.0.0.1".to_string();
+                }
+                if ui.button("Gen3").clicked() {
+                    self.connection_string = "128.111.23.124".to_string();
+                }
+            });
             ui.horizontal(|ui| {
                 let te = egui::TextEdit::singleline(&mut self.connection_string)
                     .hint_text("Enter a board address");
@@ -890,7 +899,7 @@ pub fn run_gui() {
         native_options,
         Box::new(|_cc: &CreationContext| {
             Ok(Box::new(ReadingRainbow {
-                connection_string: "127.0.0.1".into(),
+                connection_string: "".into(), // Start empty
                 pending_connections: vec![],
                 tree,
                 tree_behavior: TreeBehavior {},
