@@ -56,6 +56,11 @@ struct BoardConnectionUIData {
     // Add a field for the save path input and save trigger
     save_capture_path: String,
     save_capture_trigger: bool,
+    // Store last capture info for saving
+    last_capture_count: Option<usize>,
+    last_capture_type: Option<CaptureType>,
+    // Add a field to show save status in the GUI
+    save_status: Option<String>,
 }
 
 #[derive(Default)]
@@ -249,52 +254,76 @@ impl BoardConnection {
 
     fn setup_callback(&mut self, _data: &mut BoardConnectionUIData) {}
 
-    // Add a method to save the capture data to a file
+    // Saving capture data to a file
     fn save_capture(&self, data: &mut BoardConnectionUIData) {
+        // Only launch save capture option if a capture exists
         if let Some(snap) = &data.latest_capture {
             let path = data.save_capture_path.trim();
             if path.is_empty() {
                 error!("No file path provided for saving capture.");
+                data.save_status = Some("No file path provided for saving capture.".to_string());
                 return;
             }
+            // Saved capture file header
+            // Header includes count and type (RawIQ, DDCIQ, or Phase)
+            let count = data.last_capture_count.unwrap_or(0);
+            let ctype = match data.last_capture_type {
+                Some(CaptureType::RawIQ) => "RawIQ",
+                Some(CaptureType::DDCIQ) => "DDCIQ",
+                Some(CaptureType::Phase) => "Phase",
+                None => "Unknown",
+            };
+            // The header is written at the top of the file for user reference
+            let mut header = format!(
+                "# Capture Parameters\n# Type: {}\n# Count: {}\n\n",
+                ctype, count
+            );
+            // Write capture data
             let result = match snap {
                 Snap::Raw(iq) => {
-                    let mut w = String::new();
-                    w.push_str("snap = [\n");
+                    // Write Raw IQ as a list of (re, im) tuples
+                    header.push_str("snap = [\n");
                     for c in iq.iter() {
-                        w.push_str(&format!("({}, {}),\n", c.re, c.im));
+                        header.push_str(&format!("({}, {}),\n", c.re, c.im));
                     }
-                    w.push_str("]\n");
-                    std::fs::write(path, w)
+                    header.push_str("]\n");
+                    std::fs::write(path, header)
                 }
                 Snap::DdcIQ(iqs) => {
-                    let mut w = String::new();
-                    w.push_str("snap_ddc = [\n");
+                    // Write DDC Channel data as a list of (re, im) tuples
+                    header.push_str("snap_ddc = [\n");
                     for (ch, iq) in iqs.iter().enumerate() {
-                        w.push_str(&format!("# Channel {}\n", ch));
+                        header.push_str(&format!("# Channel {}\n", ch));
                         for c in iq.iter() {
-                            w.push_str(&format!("({}, {}),\n", c.re, c.im));
+                            header.push_str(&format!("({}, {}),\n", c.re, c.im));
                         }
                     }
-                    w.push_str("]\n");
-                    std::fs::write(path, w)
+                    header.push_str("]\n");
+                    std::fs::write(path, header)
                 }
                 Snap::Phase(ps) => {
-                    let mut w = String::new();
-                    w.push_str("snap_phase = [\n");
+                    // For Phase, write each channel's phase values
+                    header.push_str("snap_phase = [\n");
                     for (ch, phase) in ps.iter().enumerate() {
-                        w.push_str(&format!("# Channel {}\n", ch));
+                        header.push_str(&format!("# Channel {}\n", ch));
                         for p in phase.iter() {
-                            w.push_str(&format!("{},\n", p));
+                            header.push_str(&format!("{},\n", p));
                         }
                     }
-                    w.push_str("]\n");
-                    std::fs::write(path, w)
+                    header.push_str("]\n");
+                    std::fs::write(path, header)
                 }
             };
+            // Logging, print in GUI if capture was saved successfully or if there was an error
             match result {
-                Ok(_) => info!("Capture saved to {}", path),
-                Err(e) => error!("Failed to save capture: {}", e),
+                Ok(_) => {
+                    info!("Capture saved to {}", path);
+                    data.save_status = Some(format!("Capture saved to {}", path));
+                }
+                Err(e) => {
+                    error!("Failed to save capture: {}", e);
+                    data.save_status = Some(format!("Failed to save capture: {}", e));
+                }
             }
         }
     }
@@ -362,6 +391,7 @@ impl UIAble for BoardConnection {
                     ui.horizontal(|ui| {
                         ui.add(egui::DragValue::new(&mut data.capture_count).speed(64));
                         if ui.button("Raw IQ").clicked() {
+                            // When user requests RawIQ capture, store count and type
                             self.command
                                 .send(RPCCommand::PerformCapture(
                                     data.capture_count,
@@ -369,6 +399,8 @@ impl UIAble for BoardConnection {
                                 ))
                                 .unwrap();
                             data.waiting_capture = true;
+                            data.last_capture_count = Some(data.capture_count);
+                            data.last_capture_type = Some(CaptureType::RawIQ);
                         }
                         ui.add_enabled_ui(
                             if let BoardState::Operating(bsi) = self.state.read().unwrap().clone() {
@@ -378,6 +410,7 @@ impl UIAble for BoardConnection {
                             },
                             |ui| {
                                 if ui.button("DDC IQ").clicked() {
+                                    // When user requests DDCIQ capture, store count and type
                                     self.command
                                         .send(RPCCommand::PerformCapture(
                                             data.capture_count,
@@ -385,8 +418,11 @@ impl UIAble for BoardConnection {
                                         ))
                                         .unwrap();
                                     data.waiting_capture = true;
+                                    data.last_capture_count = Some(data.capture_count);
+                                    data.last_capture_type = Some(CaptureType::DDCIQ);
                                 }
                                 if ui.button("Phase").clicked() {
+                                    // When user requests a Phase capture, store count and type 
                                     self.command
                                         .send(RPCCommand::PerformCapture(
                                             data.capture_count,
@@ -394,6 +430,8 @@ impl UIAble for BoardConnection {
                                         ))
                                         .unwrap();
                                     data.waiting_capture = true;
+                                    data.last_capture_count = Some(data.capture_count);
+                                    data.last_capture_type = Some(CaptureType::Phase);
                                 }
                             },
                         );
@@ -401,24 +439,36 @@ impl UIAble for BoardConnection {
                             ui.spinner();
                         }
                     });
-                    // --- Add Save Capture UI ---
+                    // Saving Capture 
                     if data.latest_capture.is_some() {
                         ui.separator();
                         ui.horizontal(|ui| {
-                            ui.label("Save capture to:");
+                            // Prompting user to input save path 
+                            // The file can be brand new but the folder must exist, will not create folders
+                            // Can be a .txt file or a .dat file, DO NOT SAVE AS PDF IT WILL CORRUPT!!! 
+                            ui.label("Save Capture To:");
                             let te = egui::TextEdit::singleline(&mut data.save_capture_path)
                                 .hint_text("Enter file path");
                             te.show(ui);
                             if ui.button("Save Capture").clicked() {
+                                // Set trigger to save on next frame
                                 data.save_capture_trigger = true;
                             }
                         });
+                        // Add note about accepted file formats
+                        ui.label("Accepted file formats: .txt or .dat");
+                        ui.label("File will be created but parent folder must exist");
+                        ui.label("Do not save as .pdf or .png");
+                        // Show save status message in the GUI if present
+                        if let Some(msg) = &data.save_status {
+                            ui.label(msg);
+                        }
                         if data.save_capture_trigger {
                             self.save_capture(data);
                             data.save_capture_trigger = false;
                         }
                     }
-                    // --- End Save Capture UI ---
+                    // Ending Capture Save
                     if let Some(snap) = &mut data.latest_capture {
                         snap.ui(&mut data.snapdata, ui);
                     }
