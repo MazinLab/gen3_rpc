@@ -53,6 +53,9 @@ struct BoardConnectionUIData {
     snapdata: SnapUIData,
     sweepuidata: SweepUIData,
     sweepsetup: SweepSetupUIData,
+    // Add a field for the save path input and save trigger
+    save_capture_path: String,
+    save_capture_trigger: bool,
 }
 
 #[derive(Default)]
@@ -245,6 +248,56 @@ impl BoardConnection {
     }
 
     fn setup_callback(&mut self, _data: &mut BoardConnectionUIData) {}
+
+    // Add a method to save the capture data to a file
+    fn save_capture(&self, data: &mut BoardConnectionUIData) {
+        if let Some(snap) = &data.latest_capture {
+            let path = data.save_capture_path.trim();
+            if path.is_empty() {
+                error!("No file path provided for saving capture.");
+                return;
+            }
+            let result = match snap {
+                Snap::Raw(iq) => {
+                    let mut w = String::new();
+                    w.push_str("snap = [\n");
+                    for c in iq.iter() {
+                        w.push_str(&format!("({}, {}),\n", c.re, c.im));
+                    }
+                    w.push_str("]\n");
+                    std::fs::write(path, w)
+                }
+                Snap::DdcIQ(iqs) => {
+                    let mut w = String::new();
+                    w.push_str("snap_ddc = [\n");
+                    for (ch, iq) in iqs.iter().enumerate() {
+                        w.push_str(&format!("# Channel {}\n", ch));
+                        for c in iq.iter() {
+                            w.push_str(&format!("({}, {}),\n", c.re, c.im));
+                        }
+                    }
+                    w.push_str("]\n");
+                    std::fs::write(path, w)
+                }
+                Snap::Phase(ps) => {
+                    let mut w = String::new();
+                    w.push_str("snap_phase = [\n");
+                    for (ch, phase) in ps.iter().enumerate() {
+                        w.push_str(&format!("# Channel {}\n", ch));
+                        for p in phase.iter() {
+                            w.push_str(&format!("{},\n", p));
+                        }
+                    }
+                    w.push_str("]\n");
+                    std::fs::write(path, w)
+                }
+            };
+            match result {
+                Ok(_) => info!("Capture saved to {}", path),
+                Err(e) => error!("Failed to save capture: {}", e),
+            }
+        }
+    }
 }
 
 impl UIAble for BoardConnection {
@@ -348,6 +401,24 @@ impl UIAble for BoardConnection {
                             ui.spinner();
                         }
                     });
+                    // --- Add Save Capture UI ---
+                    if data.latest_capture.is_some() {
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            ui.label("Save capture to:");
+                            let te = egui::TextEdit::singleline(&mut data.save_capture_path)
+                                .hint_text("Enter file path");
+                            te.show(ui);
+                            if ui.button("Save Capture").clicked() {
+                                data.save_capture_trigger = true;
+                            }
+                        });
+                        if data.save_capture_trigger {
+                            self.save_capture(data);
+                            data.save_capture_trigger = false;
+                        }
+                    }
+                    // --- End Save Capture UI ---
                     if let Some(snap) = &mut data.latest_capture {
                         snap.ui(&mut data.snapdata, ui);
                     }
