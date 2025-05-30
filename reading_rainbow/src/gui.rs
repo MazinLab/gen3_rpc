@@ -264,8 +264,19 @@ impl BoardConnection {
                 data.save_status = Some("No file path provided for saving capture.".to_string());
                 return;
             }
+            // Get board state for header info
+            let board_state = self.state.read().unwrap();
+            let (lo, input_atten, output_atten, fft_scale) = match &*board_state {
+                BoardState::Operating(bsi) => (
+                    bsi.lo,
+                    bsi.power_setting.attens.input,
+                    bsi.power_setting.attens.output,
+                    bsi.power_setting.fft_scale,
+                ),
+                _ => (Hertz::new(0, 1), 0.0, 0.0, 0),
+            };
             // Saved capture file header
-            // Header includes count and type (RawIQ, DDCIQ, or Phase)
+            // Header includes count, type, and board operating parameters
             let count = data.last_capture_count.unwrap_or(0);
             let ctype = match data.last_capture_type {
                 Some(CaptureType::RawIQ) => "RawIQ",
@@ -273,15 +284,28 @@ impl BoardConnection {
                 Some(CaptureType::Phase) => "Phase",
                 None => "Unknown",
             };
-            // The header is written at the top of the file for user reference
+            // Include board parameters in header of saved capture
             let mut header = format!(
-                "# Capture Parameters\n# Type: {}\n# Count: {}\n\n",
-                ctype, count
+                "# Capture Parameters\n\
+                 # Type: {}\n\
+                 # Count: {}\n\
+                 # LO Freq: {:.5} MHz ({} Hz / {})\n\
+                 # Input Atten: {:.2} dB\n\
+                 # Output Atten: {:.2} dB\n\
+                 # FFT Scale: /2^{} ({:3x})\n\n",
+                ctype,
+                count,
+                (*lo.numer() as f64) / (*lo.denom() as f64 * 1_000_000.0),
+                lo.numer(),
+                lo.denom(),
+                input_atten,
+                output_atten,
+                fft_scale.count_ones(),
+                fft_scale,
             );
             // Write capture data
             let result = match snap {
                 Snap::Raw(iq) => {
-                    // Write Raw IQ as a list of (re, im) tuples
                     header.push_str("snap = [\n");
                     for c in iq.iter() {
                         header.push_str(&format!("({}, {}),\n", c.re, c.im));
@@ -290,7 +314,6 @@ impl BoardConnection {
                     std::fs::write(path, header)
                 }
                 Snap::DdcIQ(iqs) => {
-                    // Write DDC Channel data as a list of (re, im) tuples
                     header.push_str("snap_ddc = [\n");
                     for (ch, iq) in iqs.iter().enumerate() {
                         header.push_str(&format!("# Channel {}\n", ch));
@@ -302,7 +325,6 @@ impl BoardConnection {
                     std::fs::write(path, header)
                 }
                 Snap::Phase(ps) => {
-                    // For Phase, write each channel's phase values
                     header.push_str("snap_phase = [\n");
                     for (ch, phase) in ps.iter().enumerate() {
                         header.push_str(&format!("# Channel {}\n", ch));
