@@ -1,0 +1,10 @@
+[package]
+name = "gobble"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.55", features = ["derive"] }
+gobbler = { version = "0.1.0", path = "../gobbler" }
+npy = "0.4.0"
+serde_json = "1.0.149"
