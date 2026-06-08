@@ -31,8 +31,8 @@ fn main() {
         }
     }
 
-    meta.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    data.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    meta.sort_unstable_by_key(|a| a.0);
+    data.sort_unstable_by_key(|a| a.0);
 
     assert_eq!(meta.len(), data.len());
     meta.iter().enumerate().for_each(|f| assert_eq!(f.0, f.1.0));

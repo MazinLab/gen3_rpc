@@ -2,12 +2,6 @@ use serde::{Deserialize, Serialize};
 use soa_derive::StructOfArray;
 use std::collections::VecDeque;
 
-// Why do I still need to do this by hand in 2026...
-// Ok it's going to land soon thank god: https://github.com/rust-lang/rust/pull/151576
-#[inline(always)]
-#[cold]
-fn cold() {}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Photon<P: Clone> {
     pub phase: P,
@@ -182,7 +176,7 @@ impl Gen3Photon {
             .filter_map(|c| {
                 let p = u64::from_le_bytes(c.try_into().unwrap());
                 if !(state.synced[Self::parse_bin(p) as usize % 4]) & (Self::parse_read(p) == 0) {
-                    cold();
+                    core::hint::cold_path();
                     None
                 } else {
                     Some(Self::gobble_single(p, &mut state))
