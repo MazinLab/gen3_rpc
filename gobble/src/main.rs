@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use gobbler::{ChunkSample, Gen3Photon, GobbleState};
 use npy::NpyData;
 use serde_json::{from_reader, to_string};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -20,6 +21,7 @@ struct Cli {
 enum Commands {
     DumpDir {
         directory: Option<PathBuf>,
+        bins: Option<Vec<u32>>,
     },
     PlayDir {
         directory: Option<PathBuf>,
@@ -30,10 +32,10 @@ enum Commands {
 fn main() -> std::io::Result<()> {
     let cli = Cli::parse();
     match cli.commands {
-        Commands::DumpDir { directory } => {
+        Commands::DumpDir { directory, bins } => {
             let path = directory.unwrap_or(std::env::current_dir().unwrap());
             let (state, data) = load_dir(&path);
-            dump(state, data);
+            dump(state, data, bins);
         }
         Commands::PlayDir { directory, rate } => {
             assert!(rate > 0);
@@ -127,7 +129,10 @@ fn load_dir<'a>(
 fn dump(
     mut state: GobbleState<4, impl Iterator<Item = ChunkSample>>,
     data: impl Iterator<Item = Vec<u8>>,
+    bins: Option<Vec<u32>>,
 ) {
+    let set: Option<HashSet<_>> = bins.map(|b| b.into_iter().collect());
+
     println!("[");
     for (j, frame) in data.enumerate() {
         // Todo Semantics here are not guarenteed
@@ -136,7 +141,7 @@ fn dump(
         while fake_reader.position() < frame.len() as u64 {
             let res = Gen3Photon::gobble(&mut fake_reader, state);
             state = res.1;
-            for (i, photon) in res.0.into_iter().enumerate() {
+            for (i, photon) in res.0.into_iter().filter(|p| set.as_ref().map_or(true, |s| s.contains(&p.bin))).enumerate() {
                 if i != 0 || j != 0 {
                     println!(",");
                 }
