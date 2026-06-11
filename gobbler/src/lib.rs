@@ -41,6 +41,7 @@ impl<T: Clone, I: Iterator<Item = T>, const N: usize> MultiDeque<T, I, N> {
             iter,
         }
     }
+
     pub fn front(&mut self, lane: usize) -> Option<&T> {
         match self.heads[lane].front() {
             Some(_t) => (),
@@ -66,6 +67,10 @@ impl<T: Clone, I: Iterator<Item = T>, const N: usize> MultiDeque<T, I, N> {
         };
         self.heads[lane].pop_front()
     }
+
+    pub(crate) fn consume(self) -> I {
+        self.iter
+    }
 }
 
 impl<T: Clone + PartialEq + Eq, I: Iterator<Item = T>, const N: usize> MultiDeque<T, I, N> {
@@ -80,7 +85,6 @@ impl<T: Clone + PartialEq + Eq, I: Iterator<Item = T>, const N: usize> MultiDequ
 
 pub struct GobbleState<const N: usize, I: Iterator<Item = ChunkSample>> {
     samples: MultiDeque<ChunkSample, I, N>,
-    pub(crate) tail: Vec<u8>,
     synced: [bool; N],
 }
 
@@ -89,8 +93,11 @@ impl<const N: usize, I: Iterator<Item = ChunkSample>> GobbleState<N, I> {
         Self {
             samples: MultiDeque::new(iter),
             synced: core::array::from_fn(|_| false),
-            tail: vec![],
         }
+    }
+
+    pub fn consume(self) -> I {
+        self.samples.consume()
     }
 }
 
@@ -102,7 +109,7 @@ impl Gen3Photon {
         let bin = Self::parse_bin(photon);
         let read = Self::parse_read(photon);
 
-        let cycle = cycle + cs.cycle;
+        let cycle = cycle + cs.cycle.wrapping_shr(9);
 
         if read == 0 {
             Err(ParseError::ReadZeroed)
@@ -153,25 +160,15 @@ impl Gen3Photon {
     }
 
     pub fn gobble<I: Iterator<Item = ChunkSample>>(
-        bytes: &mut impl std::io::Read,
+        bytes: &mut impl std::io::BufRead,
         mut state: GobbleState<4, I>,
     ) -> (Vec<Self>, GobbleState<4, I>) {
-        const BUFFER_SIZE: usize = 4096;
-        let mut buffer = [0u8; BUFFER_SIZE];
-        let mut cursor = 0;
-
-        for byte in state.tail.drain(..) {
-            buffer[cursor] = byte;
-            cursor += 1
-        }
-
-        // TODO: Use std::io::BufRead::fill_buf and consume because I'm basically reimplementing that like an idiot
-        let read = bytes.read(&mut buffer[cursor..]).unwrap();
+        let buf = bytes.fill_buf().unwrap();
+        let consume = 8 * (buf.len() / 8);
 
         // TODO: To add SIMD here, iterate over ~2048 bit sized chunks_exact segments using
         // and assuming the chunksampler is alligned, recovering with read_single if it is not
-        let it = buffer[..cursor + read].chunks_exact(8);
-        it.remainder().iter().for_each(|u| state.tail.push(*u));
+        let it = buf.chunks_exact(8);
         let ret = it
             .filter_map(|c| {
                 let p = u64::from_le_bytes(c.try_into().unwrap());
@@ -183,6 +180,8 @@ impl Gen3Photon {
                 }
             })
             .collect();
+
+        bytes.consume(consume);
 
         (ret, state)
     }

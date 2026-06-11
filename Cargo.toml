@@ -1,3 +1,3 @@
 [workspace]
 resolver = "2"
-members = ["gen3_rpc", "gobble", "gobbler", "mock", "pyo3server", "reading_rainbow"]
+members = ["gen3_rpc", "gobble", "gobbler", "guibble", "mock", "pyo3server", "reading_rainbow"]
